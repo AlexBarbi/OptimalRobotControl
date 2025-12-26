@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+
+import numpy as np
+import casadi as cs
+import multiprocessing
+import time
+from time import sleep
+import os
+import matplotlib.pyplot as plt
+
+from adam.casadi.computations import KinDynComputations
+from example_robot_data.robots_loader import load
+import orc.optimal_control.casadi_adam.conf_ur5 as conf_ur5
+from orc.utils.robot_wrapper import RobotWrapper
+from orc.utils.robot_simulator import RobotSimulator
+from orc.utils.viz_utils import addViewerSphere, applyViewerConfiguration
+
+from neural_network import train_network
+
+# ====================== Configuration ======================
+# Robot dimensions
+robot = load("double_pendulum_simple")
+joints_name_list = [s for s in robot.model.names[1:]]
+nq = len(joints_name_list)
+nx = 2 * nq
+nu = nq             # Control dimension (ddq - joint acceleration)
+
+# OCP Parameters
+N = 100              # Horizon length
+dt = 0.02           # Time step
+NUM_SAMPLES = 10000  # Total number of OCPs to solve
+NUM_CORES = multiprocessing.cpu_count() # Use all available cores
+
+# Cost Weights (Regulation Task)
+W_Q = 10.0          # Weight for joint position error
+W_V = 1.0           # Weight for joint velocity error
+W_U = 0.1           # Weight for control effort (acceleration)
+
+
+def solve_single_ocp(x_init):
+    opti = cs.Opti()
+    X = [opti.variable(nx) for _ in range(N + 1)]
+    U = [opti.variable(nu) for _ in range(N)]
+    x_target = np.zeros(nx)
+    cost = 0.0
+
+    for k in range(N):
+        q_err = X[k][:nq] - x_target[:nq]
+        v_err = X[k][nq:] - x_target[nq:]
+        cost += W_Q * cs.sumsqr(q_err) 
+        cost += W_V * cs.sumsqr(v_err)
+        cost += W_U * cs.sumsqr(U[k])
+        
+        q_next_euler  = X[k][:nq] + dt * X[k][nq:]
+        dq_next_euler = X[k][nq:] + dt * U[k]
+        x_next_euler = cs.vertcat(q_next_euler, dq_next_euler)
+        opti.subject_to(X[k+1] == x_next_euler)
+
+    opti.subject_to(X[0] == x_init)
+    opti.minimize(cost)
+
+    opts = {"ipopt.print_level": 0, 
+            "print_time": 0, 
+            "ipopt.sb": "yes", 
+            "ipopt.tol": 1e-4}
+    opti.solver("ipopt", opts)
+
+    try:
+        sol = opti.solve()
+        return (x_init, sol.value(cost))
+    except Exception:
+        return None
+
+def generate_random_state():
+    q_min, q_max = -np.pi, np.pi
+    dq_min, dq_max = -2.0, 2.0
+    q_rand = np.random.uniform(q_min, q_max, nq)
+    dq_rand = np.random.uniform(dq_min, dq_max, nq)
+    return np.concatenate([q_rand, dq_rand])
+
+def generate_grid_states(num_samples, nq, q_lims, dq_lims):
+    """
+    Genera una griglia uniforme di stati iniziali (q, dq) invece che casuali.
+    Cerca di adattare il numero di punti per dimensione per avvicinarsi a num_samples.
+    """
+    # Dimensione totale dello stato
+    nx = 2 * nq
+    
+    # Calcoliamo quanti punti per dimensione servono: N^(1/nx)
+    points_per_dim = int(num_samples ** (1/nx))
+    
+    print(f"Generazione Griglia: {points_per_dim} punti per ogni dimensione di stato ({nx} dims).")
+    
+    # Creiamo i linspace per ogni dimensione
+    # q tra -pi e pi (la circonferenza completa)
+    q_ranges = [np.linspace(q_lims[0], q_lims[1], points_per_dim) for _ in range(nq)]
+    # dq tra i limiti di velocità
+    dq_ranges = [np.linspace(dq_lims[0], dq_lims[1], points_per_dim) for _ in range(nq)]
+    
+    # Uniamo tutti i range
+    all_ranges = q_ranges + dq_ranges
+    
+    # Creiamo la meshgrid (prodotto cartesiano di tutti i range)
+    mesh = np.meshgrid(*all_ranges)
+    
+    states_grid = np.vstack([m.flatten() for m in mesh]).T
+    
+    return states_grid
+
+def main(flag):
+    print(f"Starting data generation with {NUM_SAMPLES} samples on {NUM_CORES} cores.")
+    
+    if not flag:
+        # 1. Generate random initial states
+        initial_states = [generate_random_state() for i in range(NUM_SAMPLES)]
+
+    else:
+        q_min, q_max = -np.pi, np.pi
+        dq_min, dq_max = -2.0, 2.0
+        
+        # 1. Generate grid search
+        initial_states_array = generate_grid_states(NUM_SAMPLES, nq, (q_min, q_max), (dq_min, dq_max))
+        
+        initial_states = [row for row in initial_states_array]
+
+    # 2. Parallel Processing
+    start_time = time.time()
+    with multiprocessing.Pool(processes=NUM_CORES) as pool:
+        results = pool.map(solve_single_ocp, initial_states)
+    end_time = time.time()
+
+    # 3. Filter valid results
+    valid_data = [res for res in results if res is not None]
+    
+    if len(valid_data) == 0:
+        print("Nessuna soluzione valida trovata. Controlla il solver o i vincoli.")
+        return
+
+    x_data = np.array([res[0] for res in valid_data])
+    y_data = np.array([res[1] for res in valid_data])
+
+    print(f'The dataset generation took {end_time - start_time:.2f} [s]')
+    
+    # Salve dataset
+    np.savez('value_function_data_grid.npz', x_init=x_data, V_opt=y_data)
+    
+    # Simple visualization of Cost distribution
+    try:
+        plt.figure(figsize=(10, 5))
+        plt.hist(y_data, bins=50)
+        plt.title("Distribution of Optimal Costs V*(x)")
+        plt.xlabel("Cost")
+        plt.ylabel("Frequency")
+        plt.grid(True, alpha=0.3)
+        plt.show()
+    except ImportError:
+        pass
+    
+    # 3. CHIAMA LA FUNZIONE DI TRAINING
+    if len(valid_data) > 0:
+        print("Starting training...")
+        train_network(x_data, y_data, lr=1e-3)
+    else:
+        print("No data generated, skipping training.")
+
+if __name__ == "__main__":
+    DATASET_GENERATION_GRID = True
+    main(DATASET_GENERATION_GRID)
