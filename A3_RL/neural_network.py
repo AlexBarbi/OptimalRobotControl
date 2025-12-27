@@ -4,6 +4,8 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset, random_split
 import matplotlib.pyplot as plt
 
+from tqdm import tqdm
+
 class NeuralNetwork(nn.Module):
     """ A simple feedforward neural network. """
     def __init__(self, input_size, hidden_size, output_size, activation=nn.Tanh(), ub=None):
@@ -58,7 +60,7 @@ def train_network(x_data, y_data, batch_size=32, epochs=1000, lr=1e-3):
     max_cost = Y.max().item()
     ub_val = max_cost * 1.2
     
-    model = NeuralNetwork(input_dim, 128, output_dim, ub=ub_val).to(device)
+    model = NeuralNetwork(input_dim, 64, output_dim, ub=ub_val).to(device)
 
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
@@ -67,7 +69,10 @@ def train_network(x_data, y_data, batch_size=32, epochs=1000, lr=1e-3):
     train_losses = []
     test_losses = []
 
-    for epoch in range(epochs):
+    best_model = None
+    best_loss  = 1e10
+
+    for epoch in tqdm(range(epochs)):
         model.train()
         running_loss = 0.0
         
@@ -94,6 +99,9 @@ def train_network(x_data, y_data, batch_size=32, epochs=1000, lr=1e-3):
                 outputs = model(inputs)
                 loss = criterion(outputs, targets)
                 running_test_loss += loss.item() * inputs.size(0)
+            if running_test_loss < best_loss:
+                best_loss = running_test_loss
+                best_model = model
         
         epoch_test_loss = running_test_loss / test_size
         test_losses.append(epoch_test_loss)
@@ -102,8 +110,9 @@ def train_network(x_data, y_data, batch_size=32, epochs=1000, lr=1e-3):
             print(f"Epoch [{epoch+1}/{epochs}], Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_test_loss:.4f}")
 
     # 6. Save the Model
+    model = best_model
     # Saving both the state dictionary (weights) and the full model for easier loading
-    torch.save({'model': model.state_dict(), 'ub': ub_val}, 'ORC_homework/A3_RL/model.pt')
+    torch.save({'model': model.state_dict(), 'ub': ub_val}, 'model.pt')
     print("Model saved to 'model.pt'")
     
     plt.figure(figsize=(12, 5))
