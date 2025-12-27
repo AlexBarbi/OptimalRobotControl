@@ -99,12 +99,13 @@ def train_network(x_data, y_data, batch_size=32, epochs=1000, lr=1e-3):
                 outputs = model(inputs)
                 loss = criterion(outputs, targets)
                 running_test_loss += loss.item() * inputs.size(0)
-            if running_test_loss < best_loss:
-                best_loss = running_test_loss
-                best_model = model
         
         epoch_test_loss = running_test_loss / test_size
         test_losses.append(epoch_test_loss)
+
+        if epoch_test_loss < best_loss:
+            best_loss = epoch_test_loss
+            best_model = model
 
         if (epoch + 1) % 50 == 0:
             print(f"Epoch [{epoch+1}/{epochs}], Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_test_loss:.4f}")
@@ -113,7 +114,7 @@ def train_network(x_data, y_data, batch_size=32, epochs=1000, lr=1e-3):
     model = best_model
     # Saving both the state dictionary (weights) and the full model for easier loading
     torch.save({'model': model.state_dict(), 'ub': ub_val}, 'model.pt')
-    print("Model saved to 'model.pt'")
+    print(f"Model with {best_loss} saved to 'model.pt'")
     
     plt.figure(figsize=(12, 5))
         
