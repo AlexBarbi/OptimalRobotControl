@@ -27,7 +27,7 @@ nu = nq             # Control dimension (ddq - joint acceleration)
 
 # OCP Parameters
 N = 100              # Horizon length
-dt = 0.02           # Time step
+dt = 0.02            # Time step
 NUM_SAMPLES = 10000  # Total number of OCPs to solve
 NUM_CORES = multiprocessing.cpu_count() # Use all available cores
 
@@ -36,8 +36,7 @@ W_Q = 10.0          # Weight for joint position error
 W_V = 1.0           # Weight for joint velocity error
 W_U = 0.1           # Weight for control effort (acceleration)
 
-
-def solve_single_ocp(x_init):
+def solve_single_ocp(x_init, N = 100):
     opti = cs.Opti()
     X = [opti.variable(nx) for _ in range(N + 1)]
     U = [opti.variable(nu) for _ in range(N)]
@@ -59,10 +58,52 @@ def solve_single_ocp(x_init):
     opti.subject_to(X[0] == x_init)
     opti.minimize(cost)
 
-    opts = {"ipopt.print_level": 0, 
-            "print_time": 0, 
-            "ipopt.sb": "yes", 
-            "ipopt.tol": 1e-4}
+    opts = {
+        "ipopt.print_level": 0, 
+        "print_time": 0, 
+        "ipopt.sb": "yes", 
+        "ipopt.tol": 1e-4
+    }
+    opti.solver("ipopt", opts)
+
+    try:
+        sol = opti.solve()
+        return (x_init, sol.value(cost))
+    except Exception:
+        return None
+
+def solve_single_ocp_with_terminal(x_init, N = 100):
+    opti = cs.Opti()
+    X = [opti.variable(nx) for _ in range(N + 1)]
+    U = [opti.variable(nu) for _ in range(N)]
+    x_target = np.zeros(nx)
+    cost = 0.0
+
+    for k in range(N):
+        q_err = X[k][:nq] - x_target[:nq]
+        v_err = X[k][nq:] - x_target[nq:]
+        cost += W_Q * cs.sumsqr(q_err) 
+        cost += W_V * cs.sumsqr(v_err)
+        cost += W_U * cs.sumsqr(U[k])
+        
+        q_next_euler  = X[k][:nq] + dt * X[k][nq:]
+        dq_next_euler = X[k][nq:] + dt * U[k]
+        x_next_euler = cs.vertcat(q_next_euler, dq_next_euler)
+        opti.subject_to(X[k+1] == x_next_euler)
+
+    opti.subject_to(X[0] == x_init)
+
+    # TODO Neural Network terminal
+    cost += 0
+
+    opti.minimize(cost)
+
+    opts = {
+        "ipopt.print_level": 0, 
+        "print_time": 0, 
+        "ipopt.sb": "yes", 
+        "ipopt.tol": 1e-4
+    }
     opti.solver("ipopt", opts)
 
     try:
@@ -107,42 +148,49 @@ def generate_grid_states(num_samples, nq, q_lims, dq_lims):
     
     return states_grid
 
-def main(flag):
-    print(f"Starting data generation with {NUM_SAMPLES} samples on {NUM_CORES} cores.")
+def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True):
     
-    if not flag:
-        # 1. Generate random initial states
-        initial_states = [generate_random_state() for i in range(NUM_SAMPLES)]
+    x_data = None
+    y_data = None
+    if LOAD_DATA_PATH == None:
+        print(f"Starting data generation with {NUM_SAMPLES} samples on {NUM_CORES} cores.")
+        if not GRID_SAMPLE:
+            # 1. Generate random initial states
+            initial_states = [generate_random_state() for i in range(NUM_SAMPLES)]
 
+        else:
+            q_min, q_max = -np.pi, np.pi
+            dq_min, dq_max = -2.0, 2.0
+            
+            # 1. Generate grid search
+            initial_states_array = generate_grid_states(NUM_SAMPLES, nq, (q_min, q_max), (dq_min, dq_max))
+            
+            initial_states = [row for row in initial_states_array]
+
+        # 2. Parallel Processing
+        start_time = time.time()
+        with multiprocessing.Pool(processes=NUM_CORES) as pool:
+            results = pool.map(solve_single_ocp, initial_states)
+        end_time = time.time()
+
+        # 3. Filter valid results
+        valid_data = [res for res in results if res is not None]
+        
+        if len(valid_data) == 0:
+            print("Nessuna soluzione valida trovata. Controlla il solver o i vincoli.")
+            return
+
+        x_data = np.array([res[0] for res in valid_data])
+        y_data = np.array([res[1] for res in valid_data])
+
+        print(f'The dataset generation took {end_time - start_time:.2f} [s], with {len(valid_data)} valid solutions')
+        
+        # Salve dataset
+        np.savez('value_function_data_grid.npz', x_init=x_data, V_opt=y_data)
     else:
-        q_min, q_max = -np.pi, np.pi
-        dq_min, dq_max = -2.0, 2.0
-        
-        # 1. Generate grid search
-        initial_states_array = generate_grid_states(NUM_SAMPLES, nq, (q_min, q_max), (dq_min, dq_max))
-        
-        initial_states = [row for row in initial_states_array]
-
-    # 2. Parallel Processing
-    start_time = time.time()
-    with multiprocessing.Pool(processes=NUM_CORES) as pool:
-        results = pool.map(solve_single_ocp, initial_states)
-    end_time = time.time()
-
-    # 3. Filter valid results
-    valid_data = [res for res in results if res is not None]
-    
-    if len(valid_data) == 0:
-        print("Nessuna soluzione valida trovata. Controlla il solver o i vincoli.")
-        return
-
-    x_data = np.array([res[0] for res in valid_data])
-    y_data = np.array([res[1] for res in valid_data])
-
-    print(f'The dataset generation took {end_time - start_time:.2f} [s]')
-    
-    # Salve dataset
-    np.savez('value_function_data_grid.npz', x_init=x_data, V_opt=y_data)
+        data = np.load(LOAD_DATA_PATH)
+        x_data = data['x_init']
+        y_data = data['V_opt']
     
     # Simple visualization of Cost distribution
     try:
@@ -156,13 +204,19 @@ def main(flag):
     except ImportError:
         pass
     
-    # 3. CHIAMA LA FUNZIONE DI TRAINING
-    if len(valid_data) > 0:
+    tcost_model = None
+    if LOAD_MODEL_PATH == None:
         print("Starting training...")
-        train_network(x_data, y_data, lr=1e-3)
+        tcost_model = train_network(x_data, y_data, lr=1e-3)
     else:
-        print("No data generated, skipping training.")
+        checkpoint = torch.load('model.pt')
+        model_state_dict = checkpoint['model']
+        ub_val = checkpoint['ub']
+
+        tcost_model = NeuralNetwork(input_dim, 64, output_dim, ub=ub_val).to(device)
+        model.load_state_dict(model_state_dict)
 
 if __name__ == "__main__":
+    LOAD_DATA_PATH = 'value_function_data_grid.npz'
     DATASET_GENERATION_GRID = True
-    main(DATASET_GENERATION_GRID)
+    main(LOAD_DATA_PATH, None, DATASET_GENERATION_GRID)
