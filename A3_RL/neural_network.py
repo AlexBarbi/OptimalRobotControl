@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader, TensorDataset, random_split
 import matplotlib.pyplot as plt
 
 from tqdm import tqdm
+import l4casadi as l4
 
 class NeuralNetwork(nn.Module):
     """ A simple feedforward neural network. """
@@ -22,6 +23,9 @@ class NeuralNetwork(nn.Module):
         self.initialize_weights()
 
     def forward(self, x):
+        # Handle CasADi column vector input (nx, 1) -> (1, nx)
+        if x.dim() == 2 and x.shape[1] == 1 and x.shape[0] == self.linear_stack[0].in_features:
+            x = x.T
         out = self.linear_stack(x) * self.ub
         return out
    
@@ -31,7 +35,23 @@ class NeuralNetwork(nn.Module):
                 nn.init.xavier_normal_(layer.weight)
                 nn.init.zeros_(layer.bias)
     
-    # ... (Il resto della tua classe, es. create_casadi_function) ...
+    
+    def create_casadi_function(self):
+        """
+        Create a l4casadi function that can be used in CasADi graphs.
+        """
+        # Ensure model is in eval mode
+        self.eval()
+        
+        # Create l4casadi model
+        # Assuming input dimension is 2*nq (from main.py config mainly, but inferred here)
+        # We need to know the input shape.
+        # The input_size is saved in self.linear_stack[0].in_features
+        input_dim = self.linear_stack[0].in_features
+        
+        l4_model = l4.L4CasADi(self, device='cpu', name='terminal_cost')
+        
+        return l4_model
 
 def train_network(x_data, y_data, batch_size=32, epochs=1000, lr=1e-3):
     """
