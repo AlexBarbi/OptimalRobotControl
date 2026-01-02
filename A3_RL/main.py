@@ -39,6 +39,12 @@ nq = len(joints_name_list)
 nx = 2 * nq
 nu = nq             # Control dimension (ddq - joint acceleration)
 
+# Read actuation info from pendulum if available
+# pendulum provides umax (per-joint scalar) and nu (number of joints)
+TORQUE_LIMIT = getattr(robot, 'umax', 2.0)
+# If the Pendulum object provides an 'actuated_indices' attribute use it, otherwise assume all joints actuated
+ACTUATED_INDICES = getattr(robot, 'actuated_indices', list(range(robot.nu)))
+
 # OCP Parameters
 N = 100              # Horizon length
 dt = 0.02            # Time step
@@ -60,10 +66,21 @@ def solve_single_ocp(x_init, N = 100):
     for k in range(N):
         q_err = X[k][:nq] - x_target[:nq]
         v_err = X[k][nq:] - x_target[nq:]
-        cost += W_Q * cs.sumsqr(q_err) 
+        cost += W_Q * cs.sumsqr(q_err)
         cost += W_V * cs.sumsqr(v_err)
         cost += W_U * cs.sumsqr(U[k])
-        
+
+        # Enforce actuator mask and torque limits per joint using robot defaults
+        try:
+            for j in range(nu):
+                if j not in ACTUATED_INDICES:
+                    opti.subject_to(U[k][j] == 0)
+                else:
+                    opti.subject_to(U[k][j] <= TORQUE_LIMIT)
+                    opti.subject_to(U[k][j] >= -TORQUE_LIMIT)
+        except Exception:
+            pass
+
         q_next_euler  = X[k][:nq] + dt * X[k][nq:]
         dq_next_euler = X[k][nq:] + dt * U[k]
         x_next_euler = cs.vertcat(q_next_euler, dq_next_euler)
@@ -76,7 +93,7 @@ def solve_single_ocp(x_init, N = 100):
         "ipopt.print_level": 0, 
         "print_time": 0, 
         "ipopt.sb": "yes", 
-        "ipopt.tol": 1e-4
+        "ipopt.tol": 1e-6
     }
     opti.solver("ipopt", opts)
 
@@ -96,10 +113,21 @@ def solve_single_ocp_with_terminal(x_init, N=100, terminal_model=None):
     for k in range(N):
         q_err = X[k][:nq] - x_target[:nq]
         v_err = X[k][nq:] - x_target[nq:]
-        cost += W_Q * cs.sumsqr(q_err) 
+        cost += W_Q * cs.sumsqr(q_err)
         cost += W_V * cs.sumsqr(v_err)
         cost += W_U * cs.sumsqr(U[k])
-        
+
+        # Enforce actuator mask and torque limits per joint using robot defaults
+        try:
+            for j in range(nu):
+                if j not in ACTUATED_INDICES:
+                    opti.subject_to(U[k][j] == 0)
+                else:
+                    opti.subject_to(U[k][j] <= TORQUE_LIMIT)
+                    opti.subject_to(U[k][j] >= -TORQUE_LIMIT)
+        except Exception:
+            pass
+
         q_next_euler  = X[k][:nq] + dt * X[k][nq:]
         dq_next_euler = X[k][nq:] + dt * U[k]
         x_next_euler = cs.vertcat(q_next_euler, dq_next_euler)
@@ -150,6 +178,17 @@ def solve_single_ocp_return_terminal(x_init, N = 100):
         cost += W_V * cs.sumsqr(v_err)
         cost += W_U * cs.sumsqr(U[k])
 
+        # Enforce actuator mask and torque limits per joint using robot defaults
+        try:
+            for j in range(nu):
+                if j not in ACTUATED_INDICES:
+                    opti.subject_to(U[k][j] == 0)
+                else:
+                    opti.subject_to(U[k][j] <= TORQUE_LIMIT)
+                    opti.subject_to(U[k][j] >= -TORQUE_LIMIT)
+        except Exception:
+            pass
+
         q_next_euler  = X[k][:nq] + dt * X[k][nq:]
         dq_next_euler = X[k][nq:] + dt * U[k]
         x_next_euler = cs.vertcat(q_next_euler, dq_next_euler)
@@ -188,6 +227,17 @@ def solve_single_ocp_with_terminal_return_terminal(x_init, N=100, terminal_model
         cost += W_Q * cs.sumsqr(q_err)
         cost += W_V * cs.sumsqr(v_err)
         cost += W_U * cs.sumsqr(U[k])
+
+        # Enforce actuator mask and torque limits per joint using robot defaults
+        try:
+            for j in range(nu):
+                if j not in ACTUATED_INDICES:
+                    opti.subject_to(U[k][j] == 0)
+                else:
+                    opti.subject_to(U[k][j] <= TORQUE_LIMIT)
+                    opti.subject_to(U[k][j] >= -TORQUE_LIMIT)
+        except Exception:
+            pass
 
         q_next_euler  = X[k][:nq] + dt * X[k][nq:]
         dq_next_euler = X[k][nq:] + dt * U[k]
@@ -354,8 +404,8 @@ def fine_tune_model(model, X_boot, Y_boot, epochs=200, batch_size=64, lr=1e-4, s
 
 def solve_single_ocp_get_first_control(x_init, N=100, terminal_model=None):
     """Solve OCP and return the first control input (u0) and the predicted state trajectory.
-    Returns (u0, predicted_traj) where predicted_traj is an array of shape (N+1, nx).
-    On failure, returns (None, None)."""
+    Returns (u0, predicted_traj, pred_us) where predicted_traj is an array of shape (N+1, nx) and pred_us is (N, nu).
+    On failure, returns (None, None, None)."""
     opti = cs.Opti()
     X = [opti.variable(nx) for _ in range(N + 1)]
     U = [opti.variable(nu) for _ in range(N)]
@@ -368,6 +418,17 @@ def solve_single_ocp_get_first_control(x_init, N=100, terminal_model=None):
         cost += W_Q * cs.sumsqr(q_err)
         cost += W_V * cs.sumsqr(v_err)
         cost += W_U * cs.sumsqr(U[k])
+
+        # Enforce actuator mask and torque limits per joint using robot defaults
+        try:
+            for j in range(nu):
+                if j not in ACTUATED_INDICES:
+                    opti.subject_to(U[k][j] == 0)
+                else:
+                    opti.subject_to(U[k][j] <= TORQUE_LIMIT)
+                    opti.subject_to(U[k][j] >= -TORQUE_LIMIT)
+        except Exception:
+            pass
 
         q_next_euler = X[k][:nq] + dt * X[k][nq:]
         dq_next_euler = X[k][nq:] + dt * U[k]
@@ -481,12 +542,22 @@ def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=None, tol
         predicted_trajs.append(pred)
         predicted_us.append(pred_u)
 
+        # Apply actuator mask and torque limits to the computed control
+        try:
+            mask = np.zeros(nu)
+            for j in ACTUATED_INDICES:
+                mask[j] = 1
+            u_applied = np.array(u0).reshape(-1) * mask
+            u_applied = np.clip(u_applied, -TORQUE_LIMIT, TORQUE_LIMIT)
+        except Exception:
+            u_applied = np.array(u0).reshape(-1)
+
         # compute step cost and apply dynamics
         if env is not None:
             # env.dynamics modifies state in place and returns (x, reward)
             try:
                 x_before = np.array(env.x).reshape(-1)
-                _, r = env.dynamics(env.x, u0)
+                _, r = env.dynamics(env.x, u_applied)
                 # dynamics returns (x, -cost) so step_cost = -r
                 step_cost = -r
                 x = np.array(env.x).reshape(-1)
@@ -494,23 +565,23 @@ def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=None, tol
                 # fallback to Euler if env fails
                 q = x[:nq]
                 dq = x[nq:]
-                step_cost = W_Q * np.sum(q ** 2) + W_V * np.sum(dq ** 2) + W_U * np.sum(u0 ** 2)
+                step_cost = W_Q * np.sum(q ** 2) + W_V * np.sum(dq ** 2) + W_U * np.sum(u_applied ** 2)
                 q_next = q + dt * dq
-                dq_next = dq + dt * u0
+                dq_next = dq + dt * u_applied
                 x = np.concatenate([q_next, dq_next])
         else:
             q = x[:nq]
             dq = x[nq:]
-            step_cost = W_Q * np.sum(q ** 2) + W_V * np.sum(dq ** 2) + W_U * np.sum(u0 ** 2)
+            step_cost = W_Q * np.sum(q ** 2) + W_V * np.sum(dq ** 2) + W_U * np.sum(u_applied ** 2)
             # apply dynamics (simple Euler discretization as used in OCP)
             q_next = q + dt * dq
-            dq_next = dq + dt * u0
+            dq_next = dq + dt * u_applied
             x = np.concatenate([q_next, dq_next])
 
         total_cost += step_cost
 
         traj.append(x.copy())
-        u_list.append(u0.copy())
+        u_list.append(u_applied.copy())
 
         if np.linalg.norm(x) < tol:
             if verbose:
@@ -1006,6 +1077,8 @@ if __name__ == "__main__":
     parser.add_argument('--sim-tests', type=int, default=20, help='Number of initial states for closed-loop simulation')
     parser.add_argument('--sim-T', type=int, default=None, help='Number of closed-loop steps (default N_long+M)')
     parser.add_argument('--sim-save-dir', type=str, default=None, help='Directory to save closed-loop simulation results')
+    parser.add_argument('--actuated-indices', type=str, default=None, help='Comma-separated list of actuated joint indices (e.g. 0 or 0,1)')
+    parser.add_argument('--torque-limit', type=float, default=None, help='Per-joint torque limit (overrides pendulum.umax)')
     args = parser.parse_args()
 
     LOAD_DATA_PATH = args.load_data if args.load_data else ('model/value_function_data_grid.npz' if os.path.exists('model/value_function_data_grid.npz') else None)
@@ -1015,6 +1088,25 @@ if __name__ == "__main__":
         ))
     )
     DATASET_GENERATION_GRID = not args.no_grid
+
+    # Override actuation settings if provided via CLI
+    if args.actuated_indices is not None:
+        try:
+            ACTUATED_INDICES = [int(x.strip()) for x in args.actuated_indices.split(',') if x.strip()!='']
+            # Validate indices
+            ACTUATED_INDICES = [i for i in ACTUATED_INDICES if 0 <= i < nu]
+            if len(ACTUATED_INDICES) == 0:
+                raise ValueError('No valid actuated indices provided')
+            print(f"Using actuated indices from CLI: {ACTUATED_INDICES}")
+        except Exception as e:
+            print(f"Failed to parse --actuated-indices; using default from Pendulum. Error: {e}")
+
+    if args.torque_limit is not None:
+        try:
+            TORQUE_LIMIT = float(args.torque_limit)
+            print(f"Using torque limit from CLI: {TORQUE_LIMIT}")
+        except Exception:
+            print("Failed to parse --torque-limit; using default from Pendulum")
 
     main(LOAD_DATA_PATH, LOAD_MODEL_PATH, DATASET_GENERATION_GRID, num_tests=args.num_tests, M=args.M, N_long=args.N_long, 
          save_dir=args.save_dir, seed=args.seed, diagnostic=args.diag, simulate=args.simulate, sim_tests=args.sim_tests, 
