@@ -133,8 +133,11 @@ def train_network(x_data, y_data, batch_size=32, epochs=1000, lr=1e-3):
     # 6. Save the Model
     model = best_model
     # Saving both the state dictionary (weights) and the full model for easier loading
-    torch.save({'model': model.state_dict(), 'ub': ub_val}, 'model.pt')
-    print(f"Model with {best_loss} saved to 'model.pt'")
+    # Ensure model directory exists and save inside it
+    os.makedirs('model', exist_ok=True)
+    save_path = os.path.join('model', 'model.pt')
+    torch.save({'model': model.state_dict(), 'ub': ub_val}, save_path)
+    print(f"Model with {best_loss} saved to '{save_path}'")
     
     plt.figure(figsize=(12, 5))
         

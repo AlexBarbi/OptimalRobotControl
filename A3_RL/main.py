@@ -353,7 +353,9 @@ def fine_tune_model(model, X_boot, Y_boot, epochs=200, batch_size=64, lr=1e-4, s
 
 
 def solve_single_ocp_get_first_control(x_init, N=100, terminal_model=None):
-    """Solve OCP and return the first control input (u0) as a 1-D numpy array, or None on failure."""
+    """Solve OCP and return the first control input (u0) and the predicted state trajectory.
+    Returns (u0, predicted_traj) where predicted_traj is an array of shape (N+1, nx).
+    On failure, returns (None, None)."""
     opti = cs.Opti()
     X = [opti.variable(nx) for _ in range(N + 1)]
     U = [opti.variable(nu) for _ in range(N)]
@@ -390,20 +392,41 @@ def solve_single_ocp_get_first_control(x_init, N=100, terminal_model=None):
 
     try:
         sol = opti.solve()
-        u0 = sol.value(U[0])
-        return np.array(u0).reshape(-1)
+        u0 = np.array(sol.value(U[0])).reshape(-1)
+        # Extract predicted state trajectory
+        pred_traj = []
+        for k in range(N + 1):
+            try:
+                xk = np.array(sol.value(X[k])).reshape(-1)
+            except Exception:
+                xk = np.zeros(nx)
+            pred_traj.append(xk)
+        pred_traj = np.array(pred_traj)
+        # Extract predicted control sequence
+        pred_us = []
+        for k in range(N):
+            try:
+                uk = np.array(sol.value(U[k])).reshape(-1)
+            except Exception:
+                uk = np.zeros(nu)
+            pred_us.append(uk)
+        pred_us = np.array(pred_us)
+        return u0, pred_traj, pred_us
     except Exception:
-        return None
+        return None, None, None
 
 
-def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=None, tol=1e-3, verbose=False):
+def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=None, tol=1e-3, verbose=False, env=None):
     """Simulate an MPC controller in closed-loop.
 
     controller: 'M' | 'M_term' | 'N+M'
     tcost_model: the pytorch model (needed only for 'M_term', as its l4casadi compiled function)
     T: number of simulation steps (default N_long + M)
+    env: optional environment (e.g., Pendulum instance). If provided, its dynamics() will be used for stepping.
 
-    Returns: dict with 'total_cost', 'trajectory' (list of states), 'controls' (list)
+    Returns: dict with 'total_cost', 'trajectory' (list of states), 'controls' (list),
+             'predicted_trajs' (list of predicted trajectories per step), 'predicted_us' (list of predicted control sequences),
+             'reference_traj' (array of predicted next states corresponding to applied controls)
     """
     if T is None:
         T = N_long + M
@@ -419,35 +442,72 @@ def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=None, tol
             raise ValueError('tcost_model required for M_term controller')
         l4_term = tcost_model.create_casadi_function()
 
-    x = np.array(x0).reshape(-1)
+    # if using env, reset its state
+    if env is not None:
+        try:
+            env.reset(np.array(x0).reshape(-1))
+            x = env.obs(env.x)
+            # env.obs may return same shape; ensure 1-d
+            x = np.array(env.x).reshape(-1)
+        except Exception:
+            x = np.array(x0).reshape(-1)
+        # ensure env uses our dt if available
+        try:
+            env.DT = dt
+        except Exception:
+            pass
+    else:
+        x = np.array(x0).reshape(-1)
 
     start_time = time.time()
+    predicted_trajs = []
+    predicted_us = []
     for t in range(T):
         if controller == 'M':
-            u0 = solve_single_ocp_get_first_control(x, N=M, terminal_model=None)
+            u0, pred, pred_u = solve_single_ocp_get_first_control(x, N=M, terminal_model=None)
         elif controller == 'M_term':
-            u0 = solve_single_ocp_get_first_control(x, N=M, terminal_model=l4_term)
+            u0, pred, pred_u = solve_single_ocp_get_first_control(x, N=M, terminal_model=l4_term)
         elif controller == 'N+M':
-            u0 = solve_single_ocp_get_first_control(x, N=N_long + M, terminal_model=None)
+            u0, pred, pred_u = solve_single_ocp_get_first_control(x, N=N_long + M, terminal_model=None)
         else:
             raise ValueError('Unknown controller type')
+
         if u0 is None:
             if verbose:
                 print(f"Step {t}: solver failed for controller {controller}; terminating simulation.")
             break
 
-        # compute step cost
-        q = x[:nq]
-        dq = x[nq:]
-        q_err = q - np.zeros(nq)
-        v_err = dq - np.zeros(nq)
-        step_cost = W_Q * np.sum(q_err ** 2) + W_V * np.sum(v_err ** 2) + W_U * np.sum(u0 ** 2)
-        total_cost += step_cost
+        # store predicted trajectory and predicted control sequence for logging
+        predicted_trajs.append(pred)
+        predicted_us.append(pred_u)
 
-        # apply dynamics (simple Euler discretization as used in OCP)
-        q_next = q + dt * dq
-        dq_next = dq + dt * u0
-        x = np.concatenate([q_next, dq_next])
+        # compute step cost and apply dynamics
+        if env is not None:
+            # env.dynamics modifies state in place and returns (x, reward)
+            try:
+                x_before = np.array(env.x).reshape(-1)
+                _, r = env.dynamics(env.x, u0)
+                # dynamics returns (x, -cost) so step_cost = -r
+                step_cost = -r
+                x = np.array(env.x).reshape(-1)
+            except Exception as e:
+                # fallback to Euler if env fails
+                q = x[:nq]
+                dq = x[nq:]
+                step_cost = W_Q * np.sum(q ** 2) + W_V * np.sum(dq ** 2) + W_U * np.sum(u0 ** 2)
+                q_next = q + dt * dq
+                dq_next = dq + dt * u0
+                x = np.concatenate([q_next, dq_next])
+        else:
+            q = x[:nq]
+            dq = x[nq:]
+            step_cost = W_Q * np.sum(q ** 2) + W_V * np.sum(dq ** 2) + W_U * np.sum(u0 ** 2)
+            # apply dynamics (simple Euler discretization as used in OCP)
+            q_next = q + dt * dq
+            dq_next = dq + dt * u0
+            x = np.concatenate([q_next, dq_next])
+
+        total_cost += step_cost
 
         traj.append(x.copy())
         u_list.append(u0.copy())
@@ -459,7 +519,24 @@ def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=None, tol
     end_time = time.time()
     print(f"Computed control with {controller} in {end_time - start_time:.4f} seconds.")
 
-    return {'total_cost': total_cost, 'trajectory': np.array(traj), 'controls': np.array(u_list)}
+    # Build a reference trajectory as the predicted next-state at each step
+    reference = [traj[0]]
+    for i, pred in enumerate(predicted_trajs):
+        if pred is not None and pred.shape[0] >= 2:
+            reference.append(pred[1])
+        else:
+            # if missing, repeat last actual state
+            reference.append(traj[min(i + 1, len(traj) - 1)])
+    reference = np.array(reference)
+
+    return {
+        'total_cost': total_cost,
+        'trajectory': np.array(traj),
+        'controls': np.array(u_list),
+        'predicted_trajs': predicted_trajs,
+        'predicted_us': predicted_us,
+        'reference_traj': reference,
+    }
 
 
 def simulate_batch(test_states, tcost_model, M=20, N_long=100, T=None, verbose=False, save_dir=None):
@@ -471,7 +548,8 @@ def simulate_batch(test_states, tcost_model, M=20, N_long=100, T=None, verbose=F
         if verbose:
             print(f"Simulating sample {idx+1}/{len(test_states)}")
         for c in controllers:
-            res = simulate_mpc(x0, controller=c, tcost_model=tcost_model if c == 'M_term' else None, M=M, N_long=N_long, T=T, verbose=False)
+            res = simulate_mpc(x0, controller=c, tcost_model=tcost_model if c == 'M_term' else None, M=M, 
+                               N_long=N_long, T=T, verbose=False)
             results[c].append(res['total_cost'])
 
     # convert to arrays
@@ -637,7 +715,8 @@ def compare_mpcs(test_states, tcost_model, M=20, N_long=100, verbose=True, save_
     return {'V_M': V_M, 'V_M_term': V_M_term, 'V_NM': V_NM, 'rel_err': rel_err, 'diag_rows': diag_rows}
 
 
-def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True, num_tests=100, M=20, N_long=100, save_dir=None, seed=None, diagnostic=False, simulate=True, sim_tests=20, sim_T=None, sim_save_dir=None):
+def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True, num_tests=100, M=20, N_long=100, save_dir=None, 
+         seed=None, diagnostic=False, simulate=True, sim_tests=20, sim_T=None, sim_save_dir=None):
     
     x_data = None
     y_data = None
@@ -675,23 +754,23 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True, num_
         print(f'The dataset generation took {end_time - start_time:.2f} [s], with {len(valid_data)} valid solutions')
         
         # Salve dataset
-        np.savez('value_function_data_grid.npz', x_init=x_data, V_opt=y_data)
+        np.savez('model/value_function_data_grid.npz', x_init=x_data, V_opt=y_data)
     else:
         data = np.load(LOAD_DATA_PATH)
         x_data = data['x_init']
         y_data = data['V_opt']
     
     # Simple visualization of Cost distribution
-    try:
-        plt.figure(figsize=(10, 5))
-        plt.hist(y_data, bins=50)
-        plt.title("Distribution of Optimal Costs V*(x)")
-        plt.xlabel("Cost")
-        plt.ylabel("Frequency")
-        plt.grid(True, alpha=0.3)
-        plt.show()
-    except ImportError:
-        pass
+    # try:
+    #     plt.figure(figsize=(10, 5))
+    #     plt.hist(y_data, bins=50)
+    #     plt.title("Distribution of Optimal Costs V*(x)")
+    #     plt.xlabel("Cost")
+    #     plt.ylabel("Frequency")
+    #     plt.grid(True, alpha=0.3)
+    #     plt.show()
+    # except ImportError:
+    #     pass
     
     tcost_model = None
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -706,8 +785,12 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True, num_
         random.seed(seed)
     
     # Check if model exists
-    if LOAD_MODEL_PATH is None and os.path.exists('model.pt'):
-        LOAD_MODEL_PATH = 'model.pt'
+    if LOAD_MODEL_PATH is None:
+        # Prefer model/model.pt but keep backward compatibility with model.pt
+        if os.path.exists(os.path.join('model','model.pt')):
+            LOAD_MODEL_PATH = os.path.join('model','model.pt')
+        elif os.path.exists('model.pt'):
+            LOAD_MODEL_PATH = 'model.pt'
 
     if LOAD_MODEL_PATH == None:
         print("Starting training...")
@@ -747,7 +830,10 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True, num_
             os.makedirs(save_dir_sim, exist_ok=True)
         for c in controllers:
             print(f"\nSimulating controller: {c}")
-            res = simulate_mpc(test_state, controller=c, tcost_model=tcost_model if c == 'M_term' else None, M=M, N_long=N_long, T=T_sim, verbose=True)
+            # create env instance with realistic dynamics
+            env = Pendulum(nq, open_viewer=False)
+            env.DT = dt
+            res = simulate_mpc(test_state, controller=c, tcost_model=tcost_model if c == 'M_term' else None, M=M, N_long=N_long, T=T_sim, verbose=True, env=env)
             if res is None:
                 sim_results[c] = float('nan')
                 print(f"  Solver failed for controller {c}; recorded NaN.")
@@ -755,38 +841,59 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True, num_
             sim_results[c] = res['total_cost'] if res is not None else float('nan')
             print(f"  Total closed-loop cost ({c}): {sim_results[c]:.4f}")
 
-            # Save trajectory and controls
+            # Save trajectory, controls, predicted trajectories and predicted controls
             traj = np.array(res['trajectory'])  # shape (T_steps+1, nx)
             controls = np.array(res['controls'])  # shape (T_steps, nu)
+            predicted_trajs = res.get('predicted_trajs', [])
+            predicted_us = res.get('predicted_us', [])
+            reference = res.get('reference_traj', None)
+
             t_states = np.arange(traj.shape[0]) * dt
             t_controls = np.arange(controls.shape[0]) * dt if controls.size else np.array([])
 
             if save_dir_sim:
                 npz_path = os.path.join(save_dir_sim, f'closed_loop_{c}_data.npz')
-                np.savez(npz_path, trajectory=traj, controls=controls, t_states=t_states, t_controls=t_controls)
+                np.savez(npz_path, trajectory=traj, controls=controls, t_states=t_states, t_controls=t_controls, predicted_trajs=predicted_trajs, predicted_us=predicted_us, reference_traj=reference)
                 print(f"  Saved data to {npz_path}")
 
-                # Plot position, velocity, torque
+                # Plot position, velocity, torque and reference
                 try:
                     fig, axs = plt.subplots(3, 1, figsize=(8, 9), sharex=True)
-                    # Positions
+                    # Positions (actual vs reference)
                     for j in range(nq):
-                        axs[0].plot(t_states, traj[:, j], label=f'q{j}')
+                        axs[0].plot(t_states, traj[:, j], label=f'q{j} (actual)')
+                        if reference is not None:
+                            axs[0].plot(t_states, reference[:, j], '--', label=f'q{j} (ref)')
                     axs[0].set_ylabel('position')
                     axs[0].legend(loc='best')
                     axs[0].grid(True)
 
-                    # Velocities
+                    # Velocities (actual vs reference)
                     for j in range(nq):
-                        axs[1].plot(t_states, traj[:, nq + j], label=f'dq{j}')
+                        axs[1].plot(t_states, traj[:, nq + j], label=f'dq{j} (actual)')
+                        if reference is not None:
+                            axs[1].plot(t_states, reference[:, nq + j], '--', label=f'dq{j} (ref)')
                     axs[1].set_ylabel('velocity')
                     axs[1].legend(loc='best')
                     axs[1].grid(True)
 
-                    # Torques (controls)
+                    # Torques (controls) and predicted first-step control
                     if controls.size:
                         for j in range(nu):
-                            axs[2].plot(t_controls, controls[:, j], label=f'u{j}')
+                            axs[2].plot(t_controls, controls[:, j], label=f'u{j} (applied)')
+                    # predicted first-step control sequence
+                    pred_u0_seq = []
+                    for pu in predicted_us:
+                        if pu is not None and pu.shape[0] > 0:
+                            pred_u0_seq.append(pu[0])
+                        else:
+                            pred_u0_seq.append(np.zeros(nu))
+                    pred_u0_seq = np.array(pred_u0_seq)
+                    if pred_u0_seq.size:
+                        t_pred = np.arange(pred_u0_seq.shape[0]) * dt
+                        for j in range(nu):
+                            axs[2].plot(t_pred, pred_u0_seq[:, j], '--', label=f'u{j} (pred u0)')
+
                     axs[2].set_ylabel('torque')
                     axs[2].set_xlabel('time [s]')
                     axs[2].legend(loc='best')
@@ -816,39 +923,39 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True, num_
             print(f"Saved single-state closed-loop results to {csv_path}")
         return
     
-    # Pick a random state for comparison
-    test_state = generate_random_state()
-    # Print size and split into positions (q) and velocities (dq)
-    print(f"Test State (len={len(test_state)}): q={test_state[:nq]}, dq={test_state[nq:]}")
+    # # Pick a random state for comparison
+    # test_state = generate_random_state()
+    # # Print size and split into positions (q) and velocities (dq)
+    # print(f"Test State (len={len(test_state)}): q={test_state[:nq]}, dq={test_state[nq:]}")
     
-    # 1. Horizon M without terminal cost
-    print(f"\n1. Horizon M={M} without terminal cost")
-    res1 = solve_single_ocp(test_state, N=M)
-    cost1 = res1[1] if res1 else float('nan')
-    print(f"   Cost: {cost1}")
+    # # 1. Horizon M without terminal cost
+    # print(f"\n1. Horizon M={M} without terminal cost")
+    # res1 = solve_single_ocp(test_state, N=M)
+    # cost1 = res1[1] if res1 else float('nan')
+    # print(f"   Cost: {cost1}")
     
-    # 2. Horizon M with NN terminal cost
-    print(f"\n2. Horizon M={M} with NN terminal cost")
-    res2 = solve_single_ocp_with_terminal(test_state, N=M, terminal_model=l4_tcost)
-    cost2 = res2[1] if res2 else float('nan')
-    print(f"   Cost: {cost2}")
+    # # 2. Horizon M with NN terminal cost
+    # print(f"\n2. Horizon M={M} with NN terminal cost")
+    # res2 = solve_single_ocp_with_terminal(test_state, N=M, terminal_model=l4_tcost)
+    # cost2 = res2[1] if res2 else float('nan')
+    # print(f"   Cost: {cost2}")
     
-    # 3. Horizon N + M without terminal cost
-    NM = N_long + M
-    print(f"\n3. Horizon N+M={NM} without terminal cost")
-    res3 = solve_single_ocp(test_state, N=NM)
-    cost3 = res3[1] if res3 else float('nan')
-    print(f"   Cost: {cost3}")
+    # # 3. Horizon N + M without terminal cost
+    # NM = N_long + M
+    # print(f"\n3. Horizon N+M={NM} without terminal cost")
+    # res3 = solve_single_ocp(test_state, N=NM)
+    # cost3 = res3[1] if res3 else float('nan')
+    # print(f"   Cost: {cost3}")
     
-    print("\nComparison Summary:")
-    print(f"V_M       : {cost1:.4f}")
-    print(f"V_M_term  : {cost2:.4f}")
-    print(f"V_N+M     : {cost3:.4f}")
+    # print("\nComparison Summary:")
+    # print(f"V_M       : {cost1:.4f}")
+    # print(f"V_M_term  : {cost2:.4f}")
+    # print(f"V_N+M     : {cost3:.4f}")
     
-    if cost3 != 0:
-        print(f"Rel Error (V_M_term vs V_N+M): {abs(cost2 - cost3)/cost3 * 100:.2f}%")
-    else:
-        print("Rel Error: reference cost is zero.")
+    # if cost3 != 0:
+    #     print(f"Rel Error (V_M_term vs V_N+M): {abs(cost2 - cost3)/cost3 * 100:.2f}%")
+    # else:
+    #     print("Rel Error: reference cost is zero.")
 
     # --- Batch comparison (optional, may take long) ---
     if num_tests and num_tests > 0:
@@ -869,27 +976,27 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True, num_
         print("Skipping batch comparison (num_tests=0)")
 
     # --- Closed-loop simulation (optional) ---
-    if simulate:
-        sim_n = sim_tests if (sim_tests and sim_tests > 0) else 20
-        print(f"\nRunning closed-loop simulations on {sim_n} random states...")
-        sim_states = [generate_random_state() for _ in range(sim_n)]
-        timestamp_sim = datetime.now().strftime('%Y%m%d_%H%M%S')
-        sim_save = sim_save_dir or save_dir or f'sim_results_{timestamp_sim}'
-        sim_res = simulate_batch(sim_states, tcost_model, M=M, N_long=N_long, T=sim_T, verbose=True, save_dir=sim_save)
-        # Print simple summary
-        print('\nClosed-loop Summary (mean costs):')
-        print(f"  M only mean:      {np.mean(sim_res['M']):.4f}")
-        print(f"  M + terminal mean:{np.mean(sim_res['M_term']):.4f}")
-        print(f"  N + M mean:       {np.mean(sim_res['N+M']):.4f}")
-    else:
-        print('Skipping closed-loop simulations (use --simulate)')
+    # if simulate:
+    #     sim_n = sim_tests if (sim_tests and sim_tests > 0) else 20
+    #     print(f"\nRunning closed-loop simulations on {sim_n} random states...")
+    #     sim_states = [generate_random_state() for _ in range(sim_n)]
+    #     timestamp_sim = datetime.now().strftime('%Y%m%d_%H%M%S')
+    #     sim_save = sim_save_dir or save_dir or f'sim_results_{timestamp_sim}'
+    #     sim_res = simulate_batch(sim_states, tcost_model, M=M, N_long=N_long, T=sim_T, verbose=True, save_dir=sim_save)
+    #     # Print simple summary
+    #     print('\nClosed-loop Summary (mean costs):')
+    #     print(f"  M only mean:      {np.mean(sim_res['M']):.4f}")
+    #     print(f"  M + terminal mean:{np.mean(sim_res['M_term']):.4f}")
+    #     print(f"  N + M mean:       {np.mean(sim_res['N+M']):.4f}")
+    # else:
+    #     print('Skipping closed-loop simulations (use --simulate)')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Run MPC comparison experiments')
     parser.add_argument('--load-data', type=str, default=None, help='Path to dataset (.npz)')
     parser.add_argument('--load-model', type=str, default=None, help='Path to model (.pt)')
     parser.add_argument('--no-grid', action='store_true', help='Disable grid dataset generation (use random)')
-    parser.add_argument('--num-tests', type=int, default=100, help='Number of test states for batch comparison')
+    parser.add_argument('--num-tests', type=int, default=0, help='Number of test states for batch comparison')
     parser.add_argument('--M', type=int, default=10, help='Short horizon M')
     parser.add_argument('--N-long', type=int, default=100, help='Long horizon N used in training')
     parser.add_argument('--save-dir', type=str, default=None, help='Directory to save comparison results')
@@ -901,8 +1008,14 @@ if __name__ == "__main__":
     parser.add_argument('--sim-save-dir', type=str, default=None, help='Directory to save closed-loop simulation results')
     args = parser.parse_args()
 
-    LOAD_DATA_PATH = args.load_data if args.load_data else ('value_function_data_grid.npz' if os.path.exists('value_function_data_grid.npz') else None)
-    LOAD_MODEL_PATH = args.load_model if args.load_model else ('model.pt' if os.path.exists('model.pt') else None)
+    LOAD_DATA_PATH = args.load_data if args.load_data else ('model/value_function_data_grid.npz' if os.path.exists('model/value_function_data_grid.npz') else None)
+    LOAD_MODEL_PATH = args.load_model if args.load_model else (
+        (os.path.join('model','model.pt') if os.path.exists(os.path.join('model','model.pt')) else (
+            'model.pt' if os.path.exists('model.pt') else None
+        ))
+    )
     DATASET_GENERATION_GRID = not args.no_grid
 
-    main(LOAD_DATA_PATH, LOAD_MODEL_PATH, DATASET_GENERATION_GRID, num_tests=args.num_tests, M=args.M, N_long=args.N_long, save_dir=args.save_dir, seed=args.seed, diagnostic=args.diag, simulate=args.simulate, sim_tests=args.sim_tests, sim_T=args.sim_T, sim_save_dir=args.sim_save_dir)
+    main(LOAD_DATA_PATH, LOAD_MODEL_PATH, DATASET_GENERATION_GRID, num_tests=args.num_tests, M=args.M, N_long=args.N_long, 
+         save_dir=args.save_dir, seed=args.seed, diagnostic=args.diag, simulate=args.simulate, sim_tests=args.sim_tests, 
+         sim_T=args.sim_T, sim_save_dir=args.sim_save_dir)
