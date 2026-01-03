@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset, random_split
 import matplotlib.pyplot as plt
+import os
 
 from tqdm import tqdm
 import l4casadi as l4
@@ -53,7 +54,7 @@ class NeuralNetwork(nn.Module):
         
         return l4_model
 
-def train_network(x_data, y_data, batch_size=32, epochs=1000, lr=1e-3):
+def train_network(x_data, y_data, batch_size=32, epochs=10000, lr=1e-3):
     """
     Funzione per allenare la rete. Può essere chiamata dal main script.
     """
@@ -106,7 +107,7 @@ def train_network(x_data, y_data, batch_size=32, epochs=1000, lr=1e-3):
             optimizer.step()
             
             running_loss += loss.item() * inputs.size(0)
-        
+            
         epoch_train_loss = running_loss / train_size
         train_losses.append(epoch_train_loss)
 
