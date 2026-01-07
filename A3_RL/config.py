@@ -1,7 +1,7 @@
 """Project configuration and constants used across modules."""
 import numpy as np
 import os
-from pendulum import Pendulum
+# from pendulum import Pendulum
 import multiprocessing
 
 # Robot init: allow choosing robot via ROBOT_TYPE env var or CLI flag '--robot-type'
@@ -25,7 +25,8 @@ import multiprocessing
 from example_robot_data.robots_loader import load
 from adam.casadi.computations import KinDynComputations
 
-ROBOT = load("double_pendulum")
+PENDULUM = os.environ.get('ROBOT_TYPE', 'double_pendulum').lower()
+ROBOT = load(PENDULUM)
 
 joints_name_list = [s for s in ROBOT.model.names[1:]] # skip the first name because it is "universe"
 NQ = len(joints_name_list)  # number of joints
@@ -34,22 +35,22 @@ NX = 2*NQ # size of the state variable
 NU = NQ  # size of the control input
 KINDYN = KinDynComputations(ROBOT.urdf, joints_name_list)
 # Actuation and limits
-TORQUE_LIMIT = getattr(ROBOT, 'umax', getattr(ROBOT, 'torque_limit', 2.0))
+TORQUE_LIMIT = getattr(ROBOT, 'umax', getattr(ROBOT, 'torque_limit', 10.0))
 # Default actuated indices to all joints if robot doesn't expose them (some wrappers lack `nu`)
 ACTUATED_INDICES = list(getattr(ROBOT, 'actuated_indices', list(range(NQ))))
 # OCP / simulation parameters
-N = 1000
+N = 100
 DT = 0.01
 M = 10
 
-T = 10000  # Total simulation time steps
+T = 750  # Total simulation time steps
 
 # Dataset / parallelism
-NUM_SAMPLES = 100
+NUM_SAMPLES = 10000
 NUM_CORES = multiprocessing.cpu_count()
 
 # Cost weights
-W_Q = 10.0
+W_Q = 1000.0
 W_V = 1.0
 W_U = 0.1
 

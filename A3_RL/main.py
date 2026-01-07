@@ -40,7 +40,7 @@ if 'ROBOT_TYPE' not in os.environ:
             os.environ['ROBOT_TYPE'] = arg.split('=', 1)[1]
 
 # Configuration and constants have been moved to `config.py`
-from config import ROBOT, NQ, NX, NU, TORQUE_LIMIT, ACTUATED_INDICES, N, DT, NUM_SAMPLES, NUM_CORES, W_Q, W_V, W_U
+from config import ROBOT, NQ, NX, NU, TORQUE_LIMIT, ACTUATED_INDICES, N, DT, NUM_SAMPLES, NUM_CORES, W_Q, W_V, W_U, T
 # OCP solvers are consolidated in `ocp.py` and simulation helpers in `simulation.py`
 # Dataset helpers are in `data.py`
 def solve_single_ocp(x_init, N = N):
@@ -199,12 +199,13 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True, num_
     
     # If simulate-only mode: skip one-shot open-loop solves and batch comparisons
     if simulate:
-        T_sim = sim_T if (sim_T is not None) else (N_long + M)
+        # T_sim = sim_T if (sim_T is not None) else (N_long + M)
         test_state = generate_random_state()
         print(f"Simulate-only mode: running single closed-loop simulation from a random state (len={len(test_state)})")
         print(f"Test State: q={test_state[:NQ]}, dq={test_state[NQ:]}")
         controllers = ['M', 'M_term', 'N+M']
         sim_results = {}
+        sim_exec_times = {}
         # directory to save plots/data
         save_dir_sim = sim_save_dir or save_dir
         if save_dir_sim:
@@ -215,14 +216,18 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True, num_
             # env = Pendulum(nq, open_viewer=False)
             # env.DT = dt
             # res = simulate_mpc(test_state, controller=c, tcost_model=tcost_model if c == 'M_term' else None, M=M, N_long=N_long, T=T_sim, verbose=True, env=env)
-            res = simulate_mpc(test_state, controller=c, tcost_model=tcost_model if c == 'M_term' else None, M=M, N_long=N_long, T=T_sim, verbose=True)
+            res = simulate_mpc(test_state, controller=c, tcost_model=tcost_model if c == 'M_term' else None, M=M, N_long=N_long, T=T, verbose=True)
             if res is None:
                 sim_results[c] = float('nan')
+                sim_exec_times[c] = float('nan')
                 print(f"  Solver failed for controller {c}; recorded NaN.")
                 continue
-            sim_results[c] = res['total_cost'] if res is not None else float('nan')
+            sim_results[c] = res.get('total_cost', float('nan')) if res is not None else float('nan')
+            exec_time_val = np.sum(res['exec_time']) if (res is not None and 'exec_time' in res) else float('nan')
+            sim_exec_times[c] = exec_time_val
             print(f"  Total closed-loop cost ({c}): {sim_results[c]:.4f}")
-
+            print(f"  Execution time ({c}): {exec_time_val}")
+            
             # Save trajectory, controls, predicted trajectories and predicted controls
             traj = np.array(res['trajectory'])  # shape (T_steps+1, nx)
             controls = np.array(res['controls'])  # shape (T_steps, nu)
@@ -294,6 +299,8 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True, num_
         print("\nSingle-state Closed-loop Summary:")
         for c in controllers:
             print(f"  {c:8s}: {sim_results.get(c, float('nan')):.4f}")
+            print(f"  Execution time ({c}): {sim_exec_times.get(c, float('nan'))}")
+
         # save summary CSV if requested
         if save_dir_sim:
             csv_path = os.path.join(save_dir_sim, 'closed_loop_single_state.csv')

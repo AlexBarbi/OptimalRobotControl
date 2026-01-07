@@ -69,9 +69,11 @@ def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_
     dt = 0.010 # time step MPC
     N = N  # time horizon MPC
     # q_des = np.array([0, -1.57, 0, 0, 0, 0]) # desired joint configuration
-    q_des = np.zeros(NQ)
+    q_des = np.array([0.0, np.pi])
     J = 1
-    q_des[J] = qMin[J] + 0.01*(qMax[J] - qMin[J])
+    # Check if J is within bounds for this robot (Double pendulum has nq=2)
+    if J < NQ:
+        q_des[J] = qMin[J] + 0.01*(qMax[J] - qMin[J])
     w_p = W_Q   # position weight
     w_v = W_V  # velocity weight
     w_a = W_U  # acceleration weight
@@ -165,7 +167,8 @@ def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_
         cost += w_a * U[k].T @ U[k]
 
         # dynamics (state update using torque -> ddq mapping)
-        opti.subject_to(X[k+1] == X[k] + DT * f(X[k], U[k]))
+        # opti.subject_to(X[k+1] == X[k] + DT * f(X[k], U[k]))
+        opti.subject_to(X[k+1] == f(X[k], U[k]))
 
         # torque bounds: controls are torques, so bound U directly
         # opti.subject_to( opti.bounded(tau_min, U[k], tau_max))

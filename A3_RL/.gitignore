@@ -5,4 +5,4 @@ __pycache__/*.pyc
 _l4c_generated/
 tmp_sim/
 
-model/
+# model/

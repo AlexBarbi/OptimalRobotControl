@@ -12,7 +12,7 @@ from example_robot_data.robots_loader import load
 from adam.casadi.computations import KinDynComputations
 
 # Import your local modules
-from config import NQ, NU, DT, W_Q, W_V, W_U, N, T
+from config import NQ, NU, DT, W_Q, W_V, W_U, N, T, PENDULUM
 # import orc.optimal_control.casadi_adam.conf_ur5 as conf_ur5 # Removed to avoid dimension mismatch
 from orc.utils.robot_simulator import RobotSimulator
 from orc.utils.robot_wrapper import RobotWrapper
@@ -25,10 +25,10 @@ except ImportError:
     def _enforce_actuation(opti, u):
         pass
 
-def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=T, tol=1e-3, verbose=False):
+def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=T, tol=1e-3, verbose=False, steady_time=0.5, steady_error_tol=1e-2):
     print("Load robot model")
     # Load the double pendulum
-    robot = load("double_pendulum")
+    robot = load(PENDULUM)
 
     print("Create KinDynComputations object")
     joints_name_list = [s for s in robot.model.names[1:]] # skip the first name because it is "universe"
@@ -58,7 +58,7 @@ def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=T, tol=1e
     dq0= x0[nq:]  # initial joint velocities
 
     # MPC parameters
-    q_des = np.array([np.pi, 0.0])
+    q_des = np.array([0.0, np.pi])
     J = 1
     # Check if J is within bounds for this robot (Double pendulum has nq=2)
     if J < nq:
@@ -85,7 +85,7 @@ def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=T, tol=1e
             # Physics / Simulation flags
             randomize_robot_model = False
             model_variation = 0.0
-            simulation_type = 'timestepping' # 'timestepping' or 'euler'
+            simulation_type = 'euler' # 'timestepping' or 'euler'
             
             # Friction parameters
             tau_coulomb_max = np.zeros(nq) 
@@ -210,9 +210,18 @@ def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=T, tol=1e
     predicted_trajs = []
     predicted_us = []
     total_cost = 0.0
+    
+    exec_time = []
+
+    # Early stop if tracking error remains below steady_error_tol for steady_time seconds
+    stopped_early = False
+    stop_iter = None
+    steady_counter = 0
+    steady_steps_required = max(1, int(np.ceil(steady_time / DT))) if steady_time and steady_time > 0 else None
 
     print("Start the MPC loop")
     for i in range(T):
+        # print("\n--- MPC Iteration %d ---"%i)
         start_time = clock()
 
         if(DO_WARM_START):
@@ -227,7 +236,7 @@ def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=T, tol=1e
             lam_g0 = sol.value(opti.lam_g)
             opti.set_initial(opti.lam_g, lam_g0)
         
-        print("Time step", i, "State", x)
+        # print("Time step", i, "State", x)
         opti.set_value(param_x_init, x)
         try:
             sol = opti.solve()
@@ -235,10 +244,10 @@ def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=T, tol=1e
             sol = opti.debug
         
         end_time = clock()
-
-        print("Comput. time: %.3f s"%(end_time-start_time), 
-            "Iters: %3d"%sol.stats()['iter_count'], 
-            "Tracking err: %.3f"%np.linalg.norm(q_des-x[:nq]))
+        exec_time.append(end_time - start_time)
+        # print("Comput. time: %.3f s"%(end_time-start_time), 
+        #     "Iters: %3d"%sol.stats()['iter_count'], 
+        #     "Tracking err: %.3f"%np.linalg.norm(q_des-x[:nq]))
         
         # ---------------------------------------------------------
         # Extract Predictions and Controls
@@ -265,6 +274,27 @@ def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=T, tol=1e
                     w_a * np.sum(u_applied**2)
         total_cost += step_cost
 
+        # Check for sustained near-zero tracking error and stop simulation if met
+        error_norm = np.linalg.norm(curr_q - q_des)
+        if steady_steps_required is not None:
+            if error_norm < steady_error_tol:
+                steady_counter += 1
+            else:
+                steady_counter = 0
+            if steady_counter >= steady_steps_required:
+                stopped_early = True
+                stop_iter = i
+                # If we have a predicted next state, append it so trajectory and reference lengths match
+                try:
+                    if 'pred_x' in locals() and pred_x is not None and pred_x.shape[0] >= 2:
+                        next_state = pred_x[1]
+                        traj.append(next_state.copy())
+                except Exception:
+                    pass
+                if verbose:
+                    print(colored(f"Stopping simulation at step {i} (t={i*DT:.3f}s): error {error_norm:.3e} < {steady_error_tol} for {steady_time}s", "green"))
+                break
+
         # ---------------------------------------------------------
         # Step Simulator
         # ---------------------------------------------------------
@@ -284,10 +314,10 @@ def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=T, tol=1e
         traj.append(x.copy())
 
         # Check limits
-        if( np.any(x[:nq] > qMax)):
-            print(colored("\nUPPER POSITION LIMIT VIOLATED ON JOINTS", "red"), np.where(x[:nq]>qMax)[0])
-        if( np.any(x[:nq] < qMin)):
-            print(colored("\nLOWER POSITION LIMIT VIOLATED ON JOINTS", "red"), np.where(x[:nq]<qMin)[0])
+        # if( np.any(x[:nq] > qMax)):
+            # print(colored("\nUPPER POSITION LIMIT VIOLATED ON JOINTS", "red"), np.where(x[:nq]>qMax)[0])
+        # if( np.any(x[:nq] < qMin)):
+            # print(colored("\nLOWER POSITION LIMIT VIOLATED ON JOINTS", "red"), np.where(x[:nq]<qMin)[0])
     
     # ---------------------------------------------------------
     # Construct Reference Trajectory for Return
@@ -308,6 +338,9 @@ def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=T, tol=1e
         'predicted_trajs': predicted_trajs,
         'predicted_us': predicted_us,
         'reference_traj': reference,
+        'stopped_early': stopped_early,
+        'stop_time': (stop_iter*DT) if stop_iter is not None else None,
+        'exec_time': exec_time
     }
 
 __all__ = ['simulate_mpc']
