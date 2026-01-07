@@ -1,8 +1,8 @@
 *.pt
-# *.npz
+*.npz
 
-# model_double/
-# model_single/
+model_double/
+model_single/
 
 __pycache__/*.pyc
 _l4c_generated/
