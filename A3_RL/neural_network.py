@@ -54,7 +54,7 @@ class NeuralNetwork(nn.Module):
         
         return l4_model
 
-def train_network(x_data, y_data, batch_size=32, epochs=500, lr=1e-3):
+def train_network(x_data, y_data, batch_size=32, epochs=500, lr=1e-3, save_dir='model_double'):
     """
     Funzione per allenare la rete. Può essere chiamata dal main script.
     """
@@ -135,8 +135,8 @@ def train_network(x_data, y_data, batch_size=32, epochs=500, lr=1e-3):
     model = best_model
     # Saving both the state dictionary (weights) and the full model for easier loading
     # Ensure model directory exists and save inside it
-    os.makedirs('model', exist_ok=True)
-    save_path = os.path.join('model', 'model.pt')
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, 'model.pt')
     torch.save({'model': model.state_dict(), 'ub': ub_val}, save_path)
     print(f"Model with {best_loss} saved to '{save_path}'")
     

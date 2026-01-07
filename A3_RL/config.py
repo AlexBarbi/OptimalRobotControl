@@ -23,10 +23,18 @@ import multiprocessing
 # nx = 2 * nq
 # nu = nq
 from example_robot_data.robots_loader import load
+import pinocchio as pin
 from adam.casadi.computations import KinDynComputations
 
 PENDULUM = os.environ.get('ROBOT_TYPE', 'double_pendulum').lower()
-ROBOT = load(PENDULUM)
+
+if PENDULUM == 'single_pendulum':
+    urdf_dir = os.path.dirname(os.path.abspath(__file__))
+    urdf_path = os.path.join(urdf_dir, 'single_pendulum_description/urdf/single_pendulum.urdf')
+    ROBOT = pin.RobotWrapper.BuildFromURDF(urdf_path, package_dirs=[urdf_dir])
+    ROBOT.urdf = urdf_path
+else:
+    ROBOT = load(PENDULUM)
 
 joints_name_list = [s for s in ROBOT.model.names[1:]] # skip the first name because it is "universe"
 NQ = len(joints_name_list)  # number of joints

@@ -69,7 +69,10 @@ def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_
     dt = 0.010 # time step MPC
     N = N  # time horizon MPC
     # q_des = np.array([0, -1.57, 0, 0, 0, 0]) # desired joint configuration
-    q_des = np.array([0.0, np.pi])
+    if NQ == 1:
+        q_des = np.array([0.0])
+    else:
+        q_des = np.array([0.0, np.pi])
     J = 1
     # Check if J is within bounds for this robot (Double pendulum has nq=2)
     if J < NQ:
@@ -250,89 +253,6 @@ def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_
         return (x_init, sol.value(cost))
     except Exception:
         return None
-
-
-
-# def solve_ocp1(x_init, N=100, terminal_model=None, return_xN=False, return_first_control=False):
-#     """Generic OCP solver.
-
-#     Args:
-#         x_init: initial state (array-like)
-#         N: horizon length
-#         terminal_model: casadi callable for terminal cost (optional)
-#         return_xN: if True return final state along with cost
-#         return_first_control: if True return first control and predicted traj
-
-#     Returns:
-#         By default: (x_init, cost) or None on failure.
-#         If return_xN: (x_init, cost, xN)
-#         If return_first_control: (u0, pred_traj, pred_us) or (None, None, None)
-#     """
-#     opti = cs.Opti()
-#     X = [opti.variable(nx) for _ in range(N+1)]
-#     U = [opti.variable(nu) for _ in range(N)]
-#     # x_target = np.zeros(nx)
-#     cost = 0.0
-
-#     for k in range(N):
-#         # q_err = X[k][:nq] - x_target[:nq]
-#         # v_err = X[k][nq:] - x_target[nq:]
-#         cost += W_Q * cs.sumsqr(X[k][:nq])
-#         cost += W_V * cs.sumsqr(X[k][nq:])
-#         cost += W_U * cs.sumsqr(U[k])
-
-#         _enforce_actuation(opti, U[k])
-
-#         q_next_euler = X[k][:nq] + dt * X[k][nq:]
-#         dq_next_euler = X[k][nq:] + dt * U[k]
-#         x_next_euler = cs.vertcat(q_next_euler, dq_next_euler)
-#         opti.subject_to(X[k + 1] == x_next_euler)
-
-#     opti.subject_to(X[0] == x_init)
-        
-#     if terminal_model is not None:
-#         cost += terminal_model(X[N])
-
-#     opti.minimize(cost)
-
-#     opts = {
-#         "ipopt.print_level": 0,
-#         "print_time": 0,
-#         "ipopt.sb": "yes",
-#         "ipopt.tol": 1e-4,
-#     }
-#     opti.solver("ipopt", opts)
-
-#     try:
-#         sol = opti.solve()
-#         if return_first_control:
-#             try:
-#                 u0 = np.array(sol.value(U[0])).reshape(-1)
-#             except Exception:
-#                 u0 = np.zeros(nu)
-#             pred_traj = []
-#             for k in range(N + 1):
-#                 try:
-#                     pred_traj.append(np.array(sol.value(X[k])).reshape(-1))
-#                 except Exception:
-#                     pred_traj.append(np.zeros(nx))
-#             pred_traj = np.array(pred_traj)
-#             pred_us = []
-#             for k in range(N):
-#                 try:
-#                     pred_us.append(np.array(sol.value(U[k])).reshape(-1))
-#                 except Exception:
-#                     pred_us.append(np.zeros(nu))
-#             pred_us = np.array(pred_us)
-#             return u0, pred_traj, pred_us
-
-#         if return_xN:
-#             xN = sol.value(X[N])
-#             return (x_init, sol.value(cost), np.array(xN).reshape(-1))
-
-#         return (x_init, sol.value(cost))
-#     except Exception:
-#         return None
 
 
 # Backwards-compatible wrappers

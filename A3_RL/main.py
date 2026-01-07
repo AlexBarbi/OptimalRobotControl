@@ -40,7 +40,14 @@ if 'ROBOT_TYPE' not in os.environ:
             os.environ['ROBOT_TYPE'] = arg.split('=', 1)[1]
 
 # Configuration and constants have been moved to `config.py`
-from config import ROBOT, NQ, NX, NU, TORQUE_LIMIT, ACTUATED_INDICES, N, DT, NUM_SAMPLES, NUM_CORES, W_Q, W_V, W_U, T
+from config import ROBOT, NQ, NX, NU, TORQUE_LIMIT, ACTUATED_INDICES, N, DT, NUM_SAMPLES, NUM_CORES, W_Q, W_V, W_U, T, PENDULUM
+
+# Determine model directory based on robot type
+if PENDULUM == 'single_pendulum':
+    MODEL_DIR = 'model_single'
+else:
+    MODEL_DIR = 'model_double'
+
 # OCP solvers are consolidated in `ocp.py` and simulation helpers in `simulation.py`
 # Dataset helpers are in `data.py`
 def solve_single_ocp(x_init, N = N):
@@ -147,7 +154,8 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True, num_
         for i in range(min(50, len(valid_data))):
             print(f"  x_init[{i}]: {x_data[i]}, V*[{i}]: {y_data[i]}")
         # Salve dataset
-        np.savez('model/value_function_data_grid.npz', x_init=x_data, V_opt=y_data)
+        os.makedirs(MODEL_DIR, exist_ok=True)
+        np.savez(os.path.join(MODEL_DIR, 'value_function_data_grid.npz'), x_init=x_data, V_opt=y_data)
     else:
         data = np.load(LOAD_DATA_PATH)
         x_data = data['x_init']
@@ -167,15 +175,15 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True, num_
     
     # Check if model exists
     if LOAD_MODEL_PATH is None:
-        # Prefer model/model.pt but keep backward compatibility with model.pt
-        if os.path.exists(os.path.join('model','model.pt')):
-            LOAD_MODEL_PATH = os.path.join('model','model.pt')
+        # Prefer MODEL_DIR/model.pt but keep backward compatibility with model.pt
+        if os.path.exists(os.path.join(MODEL_DIR,'model.pt')):
+            LOAD_MODEL_PATH = os.path.join(MODEL_DIR,'model.pt')
         elif os.path.exists('model.pt'):
             LOAD_MODEL_PATH = 'model.pt'
 
     if LOAD_MODEL_PATH == None:
         print("Starting training...")
-        tcost_model = train_network(x_data, y_data)
+        tcost_model = train_network(x_data, y_data, save_dir=MODEL_DIR)
     else:
         print(f"Loading model from {LOAD_MODEL_PATH}")
         checkpoint = torch.load(LOAD_MODEL_PATH)
@@ -357,15 +365,15 @@ if __name__ == "__main__":
     # if args.robot_type is not None:
     #     os.environ['ROBOT_TYPE'] = args.robot_type
     #     LOAD_MODEL_PATH = args.load_model if args.load_model else (
-    #         (os.path.join('model','model.pt') if os.path.exists(os.path.join('model','model.pt')) else (
+    #         (os.path.join(MODEL_DIR,'model.pt') if os.path.exists(os.path.join(MODEL_DIR,'model.pt')) else (
     #             'model.pt' if os.path.exists('model.pt') else None
     #         ))
     #     )
     # DATASET_GENERATION_GRID = not args.no_grid
     
-    LOAD_DATA_PATH = args.load_data if args.load_data else ('model/value_function_data_grid.npz' if os.path.exists('model/value_function_data_grid.npz') else None)
+    LOAD_DATA_PATH = args.load_data if args.load_data else (os.path.join(MODEL_DIR, 'value_function_data_grid.npz') if os.path.exists(os.path.join(MODEL_DIR, 'value_function_data_grid.npz')) else None)
     LOAD_MODEL_PATH = args.load_model if args.load_model else (
-        (os.path.join('model','model.pt') if os.path.exists(os.path.join('model','model.pt')) else (
+        (os.path.join(MODEL_DIR,'model.pt') if os.path.exists(os.path.join(MODEL_DIR,'model.pt')) else (
             'model.pt' if os.path.exists('model.pt') else None
         ))
     )

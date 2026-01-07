@@ -10,7 +10,7 @@ from termcolor import colored
 
 from example_robot_data.robots_loader import load
 from adam.casadi.computations import KinDynComputations
-
+import pinocchio as pin
 # Import your local modules
 from config import NQ, NU, DT, W_Q, W_V, W_U, N, T, PENDULUM
 # import orc.optimal_control.casadi_adam.conf_ur5 as conf_ur5 # Removed to avoid dimension mismatch
@@ -28,7 +28,13 @@ except ImportError:
 def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=T, tol=1e-3, verbose=False, steady_time=0.5, steady_error_tol=1e-2):
     print("Load robot model")
     # Load the double pendulum
-    robot = load(PENDULUM)
+    if PENDULUM == 'single_pendulum':
+        urdf_dir = os.path.dirname(os.path.abspath(__file__))
+        urdf_path = os.path.join(urdf_dir, 'single_pendulum_description/urdf/single_pendulum.urdf')
+        robot = pin.RobotWrapper.BuildFromURDF(urdf_path, package_dirs=[urdf_dir])
+        robot.urdf = urdf_path
+    else:
+        robot = load(PENDULUM)
 
     print("Create KinDynComputations object")
     joints_name_list = [s for s in robot.model.names[1:]] # skip the first name because it is "universe"
@@ -58,7 +64,12 @@ def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=T, tol=1e
     dq0= x0[nq:]  # initial joint velocities
 
     # MPC parameters
-    q_des = np.array([0.0, np.pi])
+    # q_des = np.array([0.0, np.pi])
+    if nq == 1:
+        q_des = np.array([0.0])
+    else:
+        q_des = np.array([0.0, np.pi])
+
     J = 1
     # Check if J is within bounds for this robot (Double pendulum has nq=2)
     if J < nq:

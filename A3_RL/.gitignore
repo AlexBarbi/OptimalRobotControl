@@ -1,8 +1,6 @@
-*.pt
-*.npz
+# *.pt
+# *.npz
 
 __pycache__/*.pyc
 _l4c_generated/
 tmp_sim/
-
-model/
