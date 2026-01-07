@@ -4,109 +4,301 @@ import numpy as np
 import time
 import os
 import matplotlib.pyplot as plt
-import torch
-from ocp import solve_single_ocp_get_first_control, solve_single_ocp, solve_single_ocp_return_terminal, solve_ocp
-from config import nq, nu, dt, W_Q, W_V, W_U
+import casadi as cs
+from time import time as clock
+from termcolor import colored
 
+from example_robot_data.robots_loader import load
+from adam.casadi.computations import KinDynComputations
 
-def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=None, tol=1e-3, verbose=False, env=None):
-    if T is None:
-        T = N_long + M
+# Import your local modules
+from config import NQ, NU, DT, W_Q, W_V, W_U, N, T
+# import orc.optimal_control.casadi_adam.conf_ur5 as conf_ur5 # Removed to avoid dimension mismatch
+from orc.utils.robot_simulator import RobotSimulator
+from orc.utils.robot_wrapper import RobotWrapper
 
-    traj = [np.array(x0).reshape(-1)]
-    u_list = []
-    total_cost = 0.0
+# Import constraint helper if available in your local ocp.py
+try:
+    from ocp import _enforce_actuation
+except ImportError:
+    # Fallback if ocp.py is missing or function is not defined
+    def _enforce_actuation(opti, u):
+        pass
 
-    l4_term = None
+def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=T, tol=1e-3, verbose=False):
+    print("Load robot model")
+    # Load the double pendulum
+    robot = load("double_pendulum")
+
+    print("Create KinDynComputations object")
+    joints_name_list = [s for s in robot.model.names[1:]] # skip the first name because it is "universe"
+    nq = len(joints_name_list)  # number of joints
+    nx = 2*nq # size of the state variable
+    nu = nq  # size of the control input
+    kinDyn = KinDynComputations(robot.urdf, joints_name_list)
+
+    ADD_SPHERE = 0
+    SPHERE_POS = np.array([0.2, -0.10, 0.5])
+    SPHERE_SIZE = np.ones(3)*0.1
+    SPHERE_RGBA = np.array([1, 0, 0, 1.])
+
+    DO_WARM_START = True
+    SOLVER_TOLERANCE = 1e-4
+    SOLVER_MAX_ITER = 1000
+
+    SIMULATOR = "pinocchio" #"mujoco" or "pinocchio" or "ideal"
+    POS_BOUNDS_SCALING_FACTOR = 0.2
+    VEL_BOUNDS_SCALING_FACTOR = 2.0
+    qMin = POS_BOUNDS_SCALING_FACTOR * robot.model.lowerPositionLimit
+    qMax = POS_BOUNDS_SCALING_FACTOR * robot.model.upperPositionLimit
+    vMax = VEL_BOUNDS_SCALING_FACTOR * robot.model.velocityLimit
+    dt_sim = DT
+    N_sim = N
+    q0 = x0[:nq]  # initial joint configuration
+    dq0= x0[nq:]  # initial joint velocities
+
+    # MPC parameters
+    q_des = np.array([np.pi, 0.0])
+    J = 1
+    # Check if J is within bounds for this robot (Double pendulum has nq=2)
+    if J < nq:
+        q_des[J] = qMin[J] + 0.01*(qMax[J] - qMin[J])
+        
+    w_p = W_Q   # position weight
+    w_v = W_V  # velocity weight
+    w_a = W_U  # acceleration weight
+    
+    # Initialize Simulator
+    if(SIMULATOR=="mujoco"):
+        from orc.utils.mujoco_simulator import MujocoSimulator
+        print("Creating simulator...")
+        simu = MujocoSimulator("ur5", dt_sim) 
+        simu.set_state(q0, dq0)
+    else:
+        r = RobotWrapper(robot.model, robot.collision_model, robot.visual_model)
+        
+        # --- FIX: Create a COMPREHENSIVE dummy configuration object ---
+        class DummyConf:
+            q0 = np.zeros(nq)          # Correct size for Double Pendulum (2)
+            dt = dt_sim                # Time step
+            
+            # Physics / Simulation flags
+            randomize_robot_model = False
+            model_variation = 0.0
+            simulation_type = 'timestepping' # 'timestepping' or 'euler'
+            
+            # Friction parameters
+            tau_coulomb_max = np.zeros(nq) 
+            tau_viscous = np.zeros(nq)     
+            
+            # Viewer / Visualization flags
+            use_viewer = True          # Enable viewer
+            which_viewer = 'meshcat'   # 'gepetto' or 'meshcat'
+            viewer_name = "robot_simulator"
+            show_floor = False         # Often checked in viewer init
+            DISPLAY_T = dt_sim         # Refresh period for viewer
+            frame_name = "ee_link"     # Frame to track (usually end-effector)
+            
+        simu = RobotSimulator(DummyConf, r)
+        simu.init(q0, dq0)
+        simu.display(q0)
+        
+    print("Create optimization parameters")
+    opti = cs.Opti()
+    param_x_init = opti.parameter(nx)
+    param_q_des = opti.parameter(nq)
+    cost = 0
+
+    # create the dynamics function
+    q   = cs.SX.sym('q', nq)
+    dq  = cs.SX.sym('dq', nq)
+    ddq = cs.SX.sym('ddq', nq)
+    state = cs.vertcat(q, dq)
+    rhs    = cs.vertcat(dq, ddq)
+    f = cs.Function('f', [state, ddq], [rhs])
+
+    # create a Casadi inverse dynamics function
+    H_b = cs.SX.eye(4)     # base configuration
+    v_b = cs.SX.zeros(6)   # base velocity
+    bias_forces = kinDyn.bias_force_fun()
+    mass_matrix = kinDyn.mass_matrix_fun()
+    # discard the first 6 elements because they are associated to the robot base
+    h = bias_forces(H_b, q, v_b, dq)[6:]
+    MM = mass_matrix(H_b, q)[6:,6:]
+    tau = MM @ ddq + h
+    inv_dyn = cs.Function('inv_dyn', [state, ddq], [tau])
+
+    # pre-compute state and torque bounds
+    lbx = qMin.tolist() + (-vMax).tolist()
+    ubx = qMax.tolist() + vMax.tolist()
+    tau_min = (-robot.model.effortLimit).tolist()
+    tau_max = robot.model.effortLimit.tolist()
+
+    # create all the decision variables
+    X, U = [], []
+    X += [opti.variable(nx)] # do not apply pos/vel bounds on initial state
+    
+    horizon = 0
+    if controller == 'M':
+        horizon = M
+    elif controller == 'M_term':
+        horizon = M
+    else:
+        horizon = N_long + M
+    
+    # --- FIX: These loops were commented out, causing X and U to be too short/empty ---
+    for k in range(1, horizon+1): 
+        X += [opti.variable(nx)]
+        # opti.subject_to( opti.bounded(lbx, X[-1], ubx) )
+    for k in range(horizon): 
+        U += [opti.variable(nq)]
+    # ---------------------------------------------------------------------------------
+
+    print("Add initial conditions")
+    opti.subject_to(X[0] == param_x_init)
+    for k in range(horizon):     
+        cost += w_p * (X[k][:nq] - param_q_des).T @ (X[k][:nq] - param_q_des)
+        cost += w_v * X[k][nq:].T @ X[k][nq:]
+        cost += w_a * U[k].T @ U[k]
+
+        opti.subject_to(X[k+1] == X[k] + DT * f(X[k], U[k]))
+        # opti.subject_to( opti.bounded(tau_min, inv_dyn(X[k], U[k]), tau_max))
+        _enforce_actuation(opti, U[k])
+
+    # Optional terminal cost
     if controller == 'M_term':
         if tcost_model is None:
             raise ValueError('tcost_model required for M_term controller')
         l4_term = tcost_model.create_casadi_function()
+        cost += l4_term(X[horizon])
 
-    if env is not None:
-        try:
-            env.reset(np.array(x0).reshape(-1))
-            x = np.array(env.x).reshape(-1)
-        except Exception:
-            x = np.array(x0).reshape(-1)
-        try:
-            env.DT = dt
-        except Exception:
-            pass
-    else:
-        x = np.array(x0).reshape(-1)
+    opti.minimize(cost)
 
-    start_time = time.time()
+    print("Create the optimization problem")
+    opts = {
+        "error_on_fail": False,
+        "ipopt.print_level": 0,
+        "ipopt.tol": SOLVER_TOLERANCE,
+        "ipopt.constr_viol_tol": SOLVER_TOLERANCE,
+        "ipopt.compl_inf_tol": SOLVER_TOLERANCE,
+        "print_time": 0,                # print information about execution time
+        "detect_simple_bounds": True,
+        "ipopt.max_iter": 1000
+    }
+    opti.solver("ipopt", opts)
+
+    # set up simulation environment
+    if(SIMULATOR=="mujoco" and ADD_SPHERE):
+        simu.add_sphere(pos=SPHERE_POS, size=SPHERE_SIZE, rgba=SPHERE_RGBA)
+
+    # Solve the problem to convergence the first time
+    x = np.concatenate([q0, dq0])
+    opti.set_value(param_q_des, q_des)
+    opti.set_value(param_x_init, x)
+    sol = opti.solve()
+    opts["ipopt.max_iter"] = SOLVER_MAX_ITER
+    opti.solver("ipopt", opts)
+
+    # ---------------------------------------------------------
+    # Initialize Data Logging
+    # ---------------------------------------------------------
+    # if T is None:
+    #     T = N_long + M
+        
+    traj = [x.copy()]   # Store initial state
+    u_list = []
     predicted_trajs = []
     predicted_us = []
+    total_cost = 0.0
 
-    for t in range(T):
-        if controller == 'M':
-            u0, pred, pred_u = solve_single_ocp_get_first_control(x, N=M, terminal_model=None)
-        elif controller == 'M_term':
-            u0, pred, pred_u = solve_single_ocp_get_first_control(x, N=M, terminal_model=l4_term)
-        elif controller == 'N+M':
-            u0, pred, pred_u = solve_single_ocp_get_first_control(x, N=N_long + M, terminal_model=None)
-        else:
-            raise ValueError('Unknown controller type')
+    print("Start the MPC loop")
+    for i in range(T):
+        start_time = clock()
 
-        if u0 is None:
-            if verbose:
-                print(f"Step {t}: solver failed for controller {controller}; terminating simulation.")
-            break
-
-        predicted_trajs.append(pred)
-        predicted_us.append(pred_u)
-
-        # apply control limits
+        if(DO_WARM_START):
+            # use current solution as initial guess for next problem
+            for t in range(horizon):
+                opti.set_initial(X[t], sol.value(X[t+1]))
+            for t in range(horizon-1):
+                opti.set_initial(U[t], sol.value(U[t+1]))
+            opti.set_initial(X[horizon], sol.value(X[horizon]))
+            opti.set_initial(U[horizon-1], sol.value(U[horizon-1]))
+            # initialize dual variables
+            lam_g0 = sol.value(opti.lam_g)
+            opti.set_initial(opti.lam_g, lam_g0)
+        
+        print("Time step", i, "State", x)
+        opti.set_value(param_x_init, x)
         try:
-            mask = np.zeros(nu)
-            for j in range(nu):
-                mask[j] = 1
-            u_applied = np.array(u0).reshape(-1) * mask
-            u_applied = np.clip(u_applied, -1000, 1000)
-        except Exception:
-            u_applied = np.array(u0).reshape(-1)
+            sol = opti.solve()
+        except:
+            sol = opti.debug
+        
+        end_time = clock()
 
-        # step dynamics
-        if env is not None:
-            try:
-                _, r = env.dynamics(env.x, u_applied)
-                step_cost = -r
-                x = np.array(env.x).reshape(-1)
-            except Exception:
-                q = x[:nq]
-                dq = x[nq:]
-                step_cost = W_Q * np.sum(q ** 2) + W_V * np.sum(dq ** 2) + W_U * np.sum(u_applied ** 2)
-                q_next = q + dt * dq
-                dq_next = dq + dt * u_applied
-                x = np.concatenate([q_next, dq_next])
-        else:
-            q = x[:nq]
-            dq = x[nq:]
-            step_cost = W_Q * np.sum(q ** 2) + W_V * np.sum(dq ** 2) + W_U * np.sum(u_applied ** 2)
-            q_next = q + dt * dq
-            dq_next = dq + dt * u_applied
-            x = np.concatenate([q_next, dq_next])
+        print("Comput. time: %.3f s"%(end_time-start_time), 
+            "Iters: %3d"%sol.stats()['iter_count'], 
+            "Tracking err: %.3f"%np.linalg.norm(q_des-x[:nq]))
+        
+        # ---------------------------------------------------------
+        # Extract Predictions and Controls
+        # ---------------------------------------------------------
+        # Extract predicted trajectory (Horizon+1 x State Dim)
+        pred_x = np.array([sol.value(X[k]) for k in range(horizon+1)])
+        # Extract predicted controls (Horizon x Control Dim)
+        pred_u = np.array([sol.value(U[k]) for k in range(horizon)])
+        
+        predicted_trajs.append(pred_x)
+        predicted_us.append(pred_u)
+        
+        # Get control input to apply (first element of solution)
+        u_applied = pred_u[0]
+        u_list.append(u_applied)
 
+        # ---------------------------------------------------------
+        # Compute Running Cost
+        # ---------------------------------------------------------
+        curr_q = x[:nq]
+        curr_v = x[nq:]
+        step_cost = w_p * np.sum((curr_q - q_des)**2) + \
+                    w_v * np.sum(curr_v**2) + \
+                    w_a * np.sum(u_applied**2)
         total_cost += step_cost
+
+        # ---------------------------------------------------------
+        # Step Simulator
+        # ---------------------------------------------------------
+        tau = inv_dyn(sol.value(X[0]), sol.value(U[0])).toarray().squeeze()
+        
+        if(SIMULATOR=="mujoco"):
+            simu.step(tau, DT)
+            x = np.concatenate([simu.data.qpos, simu.data.qvel])
+        elif(SIMULATOR=="pinocchio"):
+            simu.simulate(tau, DT, int(DT/dt_sim))
+            x = np.concatenate([simu.q, simu.v])
+        elif(SIMULATOR=="ideal"):
+            x = sol.value(X[1])
+            # simu.display(x[:nq]) # Optional visualization
+
+        # Store new state
         traj.append(x.copy())
-        u_list.append(u_applied.copy())
 
-        if np.linalg.norm(x) < tol:
-            if verbose:
-                print(f"Terminated at step {t} because state norm {np.linalg.norm(x):.4e} < tol")
-            break
-
-    end_time = time.time()
-    print(f"Computed control with {controller} in {end_time - start_time:.4f} seconds.")
-
+        # Check limits
+        if( np.any(x[:nq] > qMax)):
+            print(colored("\nUPPER POSITION LIMIT VIOLATED ON JOINTS", "red"), np.where(x[:nq]>qMax)[0])
+        if( np.any(x[:nq] < qMin)):
+            print(colored("\nLOWER POSITION LIMIT VIOLATED ON JOINTS", "red"), np.where(x[:nq]<qMin)[0])
+    
+    # ---------------------------------------------------------
+    # Construct Reference Trajectory for Return
+    # ---------------------------------------------------------
+    # Often helpful to see what the MPC planned to do at the next step relative to where we actually went
     reference = [traj[0]]
-    for i, pred in enumerate(predicted_trajs):
+    for k, pred in enumerate(predicted_trajs):
         if pred is not None and pred.shape[0] >= 2:
             reference.append(pred[1])
         else:
-            reference.append(traj[min(i + 1, len(traj) - 1)])
+            reference.append(traj[min(k + 1, len(traj) - 1)])
     reference = np.array(reference)
 
     return {
@@ -117,8 +309,5 @@ def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=None, tol
         'predicted_us': predicted_us,
         'reference_traj': reference,
     }
-
-
-# Lightweight wrappers around the earlier compare_mpcs / simulate_batch behavior can be added here on demand.
 
 __all__ = ['simulate_mpc']

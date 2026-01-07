@@ -54,7 +54,7 @@ class NeuralNetwork(nn.Module):
         
         return l4_model
 
-def train_network(x_data, y_data, batch_size=32, epochs=10000, lr=1e-3):
+def train_network(x_data, y_data, batch_size=32, epochs=1000, lr=1e-3):
     """
     Funzione per allenare la rete. Può essere chiamata dal main script.
     """

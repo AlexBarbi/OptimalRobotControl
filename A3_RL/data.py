@@ -4,14 +4,14 @@ import torch
 import multiprocessing
 import time
 from ocp import solve_single_ocp, solve_single_ocp_return_terminal, solve_single_ocp_with_terminal_return_terminal
-from config import nq, NUM_SAMPLES
+from config import NQ, NUM_SAMPLES
 
 
 def generate_random_state():
     q_min, q_max = -np.pi, np.pi
     dq_min, dq_max = -8.0, 8.0
-    q_rand = np.random.uniform(q_min, q_max, nq)
-    dq_rand = np.random.uniform(dq_min, dq_max, nq)
+    q_rand = np.random.uniform(q_min, q_max, NQ)
+    dq_rand = np.random.uniform(dq_min, dq_max, NQ)
     return np.concatenate([q_rand, dq_rand])
 
 

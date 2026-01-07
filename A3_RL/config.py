@@ -1,26 +1,51 @@
 """Project configuration and constants used across modules."""
 import numpy as np
+import os
 from pendulum import Pendulum
 import multiprocessing
 
-# Robot init
-robot = Pendulum(2, open_viewer=False)
-joints_name_list = [s for s in robot.model.names[1:]]
-nq = len(joints_name_list)
-nx = 2 * nq
-nu = nq
+# Robot init: allow choosing robot via ROBOT_TYPE env var or CLI flag '--robot-type'
+# _robot_choice = os.environ.get('ROBOT_TYPE', 'pendulum').lower()
+# if _robot_choice in ('double', 'double_pendulum', 'double-pendulum'):
+#     try:
+#         from example_robot_data.robots_loader import load
+#         robot = load('double_pendulum')
+#         print(f"Config: using robot 'double_pendulum' (ROBOT_TYPE={_robot_choice})")
+#     except Exception as _e:
+#         print(f"Warning: failed to load 'double_pendulum' ({_e}); falling back to simple Pendulum")
+#         robot = Pendulum(2, open_viewer=False)
+# else:
+#     robot = Pendulum(2, open_viewer=False)
+#     print(f"Config: using simple Pendulum (ROBOT_TYPE={_robot_choice})")
 
+# joints_name_list = [s for s in robot.model.names[1:]]
+# nq = len(joints_name_list)
+# nx = 2 * nq
+# nu = nq
+from example_robot_data.robots_loader import load
+from adam.casadi.computations import KinDynComputations
+
+ROBOT = load("double_pendulum")
+
+joints_name_list = [s for s in ROBOT.model.names[1:]] # skip the first name because it is "universe"
+NQ = len(joints_name_list)  # number of joints
+NX = 2*NQ # size of the state variable
+# Controls are torques, one per joint
+NU = NQ  # size of the control input
+KINDYN = KinDynComputations(ROBOT.urdf, joints_name_list)
 # Actuation and limits
-TORQUE_LIMIT = getattr(robot, 'umax', 2.0)
-ACTUATED_INDICES = getattr(robot, 'actuated_indices', list(range(robot.nu)))
-
+TORQUE_LIMIT = getattr(ROBOT, 'umax', getattr(ROBOT, 'torque_limit', 2.0))
+# Default actuated indices to all joints if robot doesn't expose them (some wrappers lack `nu`)
+ACTUATED_INDICES = list(getattr(ROBOT, 'actuated_indices', list(range(NQ))))
 # OCP / simulation parameters
-N = 100
-dt = 0.02
+N = 1000
+DT = 0.01
 M = 10
 
+T = 10000  # Total simulation time steps
+
 # Dataset / parallelism
-NUM_SAMPLES = 5000
+NUM_SAMPLES = 100
 NUM_CORES = multiprocessing.cpu_count()
 
 # Cost weights

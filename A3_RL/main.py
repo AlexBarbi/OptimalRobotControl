@@ -27,10 +27,20 @@ import l4casadi as l4
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
-from pendulum import Pendulum
+# Simulation now uses joint_space_mpc.py; pendulum.py is deprecated.
+
+# Allow selecting robot type via CLI flag '--robot-type' or the ROBOT_TYPE env var.
+# If provided on the command line, set it early so `config.py` can pick it up when imported.
+import sys
+if 'ROBOT_TYPE' not in os.environ:
+    for i, arg in enumerate(sys.argv):
+        if arg == '--robot-type' and i + 1 < len(sys.argv):
+            os.environ['ROBOT_TYPE'] = sys.argv[i + 1]
+        elif arg.startswith('--robot-type='):
+            os.environ['ROBOT_TYPE'] = arg.split('=', 1)[1]
 
 # Configuration and constants have been moved to `config.py`
-from config import robot, nq, nx, nu, TORQUE_LIMIT, ACTUATED_INDICES, N, dt, NUM_SAMPLES, NUM_CORES, W_Q, W_V, W_U
+from config import ROBOT, NQ, NX, NU, TORQUE_LIMIT, ACTUATED_INDICES, N, DT, NUM_SAMPLES, NUM_CORES, W_Q, W_V, W_U
 # OCP solvers are consolidated in `ocp.py` and simulation helpers in `simulation.py`
 # Dataset helpers are in `data.py`
 def solve_single_ocp(x_init, N = N):
@@ -88,14 +98,13 @@ def simulate_mpc(*args, **kwargs):
 
 
 def simulate_batch(*args, **kwargs):
-    from simulation import simulate_batch as _impl
-    return _impl(*args, **kwargs)
+    # Not implemented in joint_space_mpc; raise if used
+    raise NotImplementedError('simulate_batch is not implemented; use joint_space_mpc or write a wrapper')
 
 
 def compare_mpcs(*args, **kwargs):
-    from simulation import compare_mpcs as _impl
-    return _impl(*args, **kwargs)
-
+    # Not implemented in joint_space_mpc; raise if used
+    raise NotImplementedError('compare_mpcs is not implemented; use joint_space_mpc or write a wrapper')
 
 def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True, num_tests=100, M=20, N_long=100, save_dir=None, 
          seed=None, diagnostic=False, simulate=True, sim_tests=20, sim_T=None, sim_save_dir=None):
@@ -113,10 +122,10 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True, num_
             dq_min, dq_max = -8.0, 8.0
             
             # 1. Generate grid search
-            initial_states_array = generate_grid_states(NUM_SAMPLES, nq, (q_min, q_max), (dq_min, dq_max))
+            initial_states_array = generate_grid_states(NUM_SAMPLES, NQ, (q_min, q_max), (dq_min, dq_max))
             
             initial_states = [row for row in initial_states_array]
-
+            
         # 2. Parallel Processing
         start_time = time.time()
         with multiprocessing.Pool(processes=NUM_CORES) as pool:
@@ -146,7 +155,7 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True, num_
     
     tcost_model = None
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    input_dim = nx
+    input_dim = NX
     output_dim = 1
 
     # Set seed if provided
@@ -193,7 +202,7 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True, num_
         T_sim = sim_T if (sim_T is not None) else (N_long + M)
         test_state = generate_random_state()
         print(f"Simulate-only mode: running single closed-loop simulation from a random state (len={len(test_state)})")
-        print(f"Test State: q={test_state[:nq]}, dq={test_state[nq:]}")
+        print(f"Test State: q={test_state[:NQ]}, dq={test_state[NQ:]}")
         controllers = ['M', 'M_term', 'N+M']
         sim_results = {}
         # directory to save plots/data
@@ -203,9 +212,10 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True, num_
         for c in controllers:
             print(f"\nSimulating controller: {c}")
             # create env instance with realistic dynamics
-            env = Pendulum(nq, open_viewer=False)
-            env.DT = dt
-            res = simulate_mpc(test_state, controller=c, tcost_model=tcost_model if c == 'M_term' else None, M=M, N_long=N_long, T=T_sim, verbose=True, env=env)
+            # env = Pendulum(nq, open_viewer=False)
+            # env.DT = dt
+            # res = simulate_mpc(test_state, controller=c, tcost_model=tcost_model if c == 'M_term' else None, M=M, N_long=N_long, T=T_sim, verbose=True, env=env)
+            res = simulate_mpc(test_state, controller=c, tcost_model=tcost_model if c == 'M_term' else None, M=M, N_long=N_long, T=T_sim, verbose=True)
             if res is None:
                 sim_results[c] = float('nan')
                 print(f"  Solver failed for controller {c}; recorded NaN.")
@@ -220,8 +230,8 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True, num_
             predicted_us = res.get('predicted_us', [])
             reference = res.get('reference_traj', None)
 
-            t_states = np.arange(traj.shape[0]) * dt
-            t_controls = np.arange(controls.shape[0]) * dt if controls.size else np.array([])
+            t_states = np.arange(traj.shape[0]) * DT
+            t_controls = np.arange(controls.shape[0]) * DT if controls.size else np.array([])
 
             if save_dir_sim:
                 npz_path = os.path.join(save_dir_sim, f'closed_loop_{c}_data.npz')
@@ -232,7 +242,7 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True, num_
                 try:
                     fig, axs = plt.subplots(3, 1, figsize=(8, 9), sharex=True)
                     # Positions (actual vs reference)
-                    for j in range(nq):
+                    for j in range(NQ):
                         axs[0].plot(t_states, traj[:, j], label=f'q{j} (actual)')
                         if reference is not None:
                             axs[0].plot(t_states, reference[:, j], '--', label=f'q{j} (ref)')
@@ -241,17 +251,17 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True, num_
                     axs[0].grid(True)
 
                     # Velocities (actual vs reference)
-                    for j in range(nq):
-                        axs[1].plot(t_states, traj[:, nq + j], label=f'dq{j} (actual)')
+                    for j in range(NQ):
+                        axs[1].plot(t_states, traj[:, NQ + j], label=f'dq{j} (actual)')
                         if reference is not None:
-                            axs[1].plot(t_states, reference[:, nq + j], '--', label=f'dq{j} (ref)')
+                            axs[1].plot(t_states, reference[:, NQ + j], '--', label=f'dq{j} (ref)')
                     axs[1].set_ylabel('velocity')
                     axs[1].legend(loc='best')
                     axs[1].grid(True)
 
                     # Torques (controls) and predicted first-step control
                     if controls.size:
-                        for j in range(nu):
+                        for j in range(NU):
                             axs[2].plot(t_controls, controls[:, j], label=f'u{j} (applied)')
                     # predicted first-step control sequence
                     pred_u0_seq = []
@@ -259,11 +269,11 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, GRID_SAMPLE = True, num_
                         if pu is not None and pu.shape[0] > 0:
                             pred_u0_seq.append(pu[0])
                         else:
-                            pred_u0_seq.append(np.zeros(nu))
+                            pred_u0_seq.append(np.zeros(NU))
                     pred_u0_seq = np.array(pred_u0_seq)
                     if pred_u0_seq.size:
-                        t_pred = np.arange(pred_u0_seq.shape[0]) * dt
-                        for j in range(nu):
+                        t_pred = np.arange(pred_u0_seq.shape[0]) * DT
+                        for j in range(NU):
                             axs[2].plot(t_pred, pred_u0_seq[:, j], '--', label=f'u{j} (pred u0)')
 
                     axs[2].set_ylabel('torque')
@@ -331,8 +341,21 @@ if __name__ == "__main__":
     parser.add_argument('--sim-save-dir', type=str, default=None, help='Directory to save closed-loop simulation results')
     parser.add_argument('--actuated-indices', type=str, default=None, help='Comma-separated list of actuated joint indices (e.g. 0 or 0,1)')
     parser.add_argument('--torque-limit', type=float, default=None, help='Per-joint torque limit (overrides pendulum.umax)')
+    # parser.add_argument('--robot-type', type=str, default=None, help='Robot selection: pendulum (default) or double_pendulum')
     args = parser.parse_args()
+    
+    # LOAD_DATA_PATH = args.load_data if args.load_data else ('model/value_function_data_grid.npz' if os.path.exists('model/value_function_data_grid.npz') else None)
 
+    # # If provided via CLI, set the environment variable so config.py can be consistent
+    # if args.robot_type is not None:
+    #     os.environ['ROBOT_TYPE'] = args.robot_type
+    #     LOAD_MODEL_PATH = args.load_model if args.load_model else (
+    #         (os.path.join('model','model.pt') if os.path.exists(os.path.join('model','model.pt')) else (
+    #             'model.pt' if os.path.exists('model.pt') else None
+    #         ))
+    #     )
+    # DATASET_GENERATION_GRID = not args.no_grid
+    
     LOAD_DATA_PATH = args.load_data if args.load_data else ('model/value_function_data_grid.npz' if os.path.exists('model/value_function_data_grid.npz') else None)
     LOAD_MODEL_PATH = args.load_model if args.load_model else (
         (os.path.join('model','model.pt') if os.path.exists(os.path.join('model','model.pt')) else (
@@ -346,19 +369,19 @@ if __name__ == "__main__":
         try:
             ACTUATED_INDICES = [int(x.strip()) for x in args.actuated_indices.split(',') if x.strip()!='']
             # Validate indices
-            ACTUATED_INDICES = [i for i in ACTUATED_INDICES if 0 <= i < nu]
+            ACTUATED_INDICES = [i for i in ACTUATED_INDICES if 0 <= i < NU]
             if len(ACTUATED_INDICES) == 0:
                 raise ValueError('No valid actuated indices provided')
             print(f"Using actuated indices from CLI: {ACTUATED_INDICES}")
         except Exception as e:
-            print(f"Failed to parse --actuated-indices; using default from Pendulum. Error: {e}")
+            print(f"Failed to parse --actuated-indices; using default from config. Error: {e}")
 
     if args.torque_limit is not None:
         try:
             TORQUE_LIMIT = float(args.torque_limit)
             print(f"Using torque limit from CLI: {TORQUE_LIMIT}")
         except Exception:
-            print("Failed to parse --torque-limit; using default from Pendulum")
+            print("Failed to parse --torque-limit; using default from config")
 
     main(LOAD_DATA_PATH, LOAD_MODEL_PATH, DATASET_GENERATION_GRID, num_tests=args.num_tests, M=args.M, N_long=args.N_long, 
          save_dir=args.save_dir, seed=args.seed, diagnostic=args.diag, simulate=args.simulate, sim_tests=args.sim_tests, 
