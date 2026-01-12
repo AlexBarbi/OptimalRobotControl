@@ -9,7 +9,6 @@ import argparse
 import csv
 import random
 import torch
-import sys
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -17,8 +16,30 @@ from neural_network import train_network, NeuralNetwork
 
 
 def run_simulation_instance(args):
+    """
+    Worker function to run a single simulation instance in parallel.
+    
+    This function initializes a random seed, generates a random initial state,
+    creates a CasADi function for the terminal cost (if applicable), and runs
+    simulations for different controllers:
+    - 'M': MPC with short horizon M.
+    - 'M_term': MPC with short horizon M and learned terminal cost.
+    - 'N+M': MPC with long horizon (baseline).
+
+    Args:
+        args: A tuple containing:
+            idx (int): Index of the simulation instance.
+            seed (int): Base seed for random number generation.
+            tcost_model (NeuralNetwork): The trained neural network for terminal cost.
+            M (int): Short prediction horizon.
+            N_long (int): Long prediction horizon (for baseline).
+            T (float): Simulation duration.
+
+    Returns:
+        tuple: (idx, test_state, results) where results is a dictionary of simulation outcomes.
+    """
     idx, seed, tcost_model, M, N_long, T = args
-    # Reseed
+    # Reseed to ensure different random states across workers
     pid = os.getpid()
     if seed is not None:
         np.random.seed(seed + idx)
@@ -32,10 +53,12 @@ def run_simulation_instance(args):
 
     test_state = generate_random_state()
     
+    # Create a unique name for the CasADi function to avoid collisions in parallel execution
     unique_name = f"term_cost_{pid}_{idx}"
     l4_term = None
     try:
         tcost_model.cpu() 
+        # Create CasADi function from PyTorch model for efficient evaluation in OCP
         l4_term = tcost_model.create_casadi_function(name=unique_name)
     except Exception as e:
         print(f"Worker {pid}: Failed to create l4_model: {e}")
@@ -47,11 +70,12 @@ def run_simulation_instance(args):
         term_fn = None
         if c == 'M_term':
             if l4_term is None:
-                res = None # Fail gracefully
+                res = None # Fail gracefully if terminal model creation failed
             else:
                 term_fn = l4_term
         
         try:
+            # delegated to simulation.simulate_mpc
             res = simulate_mpc(test_state, controller=c, terminal_cost_fn=term_fn, M=M, N_long=N_long, T=T, verbose=False)
         except Exception as e:
             res = None
@@ -82,26 +106,49 @@ def solve_single_ocp_with_terminal(x_init, N=100, terminal_model=None):
 
 
 def solve_single_ocp_return_terminal(x_init, N = N):
+    """
+    Solves OCP and returns the optimal cost (Value function).
+    Wrapper for `ocp.solve_single_ocp_return_terminal`.
+    """
     from ocp import solve_single_ocp_return_terminal as _impl
     return _impl(x_init, N=N)
 
 
 def solve_single_ocp_with_terminal_return_terminal(x_init, N=N, terminal_model=None):
+    """
+    Solves OCP with a terminal cost model and returns the optimal cost.
+    Wrapper for `ocp.solve_single_ocp_with_terminal_return_terminal`.
+    """
     from ocp import solve_single_ocp_with_terminal_return_terminal as _impl
     return _impl(x_init, N=N, terminal_model=terminal_model)
 
 def generate_random_state():
+    """Generates a random initial state. Wrapper for `data.generate_random_state`."""
     from data import generate_random_state as _impl
     return _impl()
 
 
 def simulate_mpc(*args, **kwargs):
+    """Runs an MPC simulation. Wrapper for `simulation.simulate_mpc`."""
     from simulation import simulate_mpc as _impl
     return _impl(*args, **kwargs)
 
 
 def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, M=20, N_long=100, 
          seed=None, simulate=True, sim_tests=20, sim_T=None, save=None):
+    """
+    Main function to orchestrate data generation, model training, and MPC simulation comparisons.
+
+    Args:
+        LOAD_DATA_PATH (str, optional): Path to existing dataset .npz file. If None, generates new data.
+        LOAD_MODEL_PATH (str, optional): Path to existing model .pt file. If None, trains a new model.
+        M (int): Prediction horizon for the short-horizon MPC.
+        N (int): Prediction horizon for the long-horizon MPC (used as ground truth/baseline).
+        seed (int, optional): Random seed for reproducibility.
+        sim (bool): Whether to run closed-loop MPC simulations.
+        Nsim (int): Number of simulation instances to run.
+        save (str, optional): Directory to save simulation outcomes and plots.
+    """
     
     x_data = None
     y_data = None
@@ -111,30 +158,32 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, M=20, N_long=100,
         # 1. Generate random initial states
         initial_states = [generate_random_state() for i in range(NUM_SAMPLES)]
             
-        # 2. Parallel Processing
+        # 2. Parallel Processing to solve OCP for each initial state (Value Function generation)
         start_time = time.time()
         with multiprocessing.Pool(processes=NUM_CORES) as pool:
+            # Solves optimal control problem for each state to get V*(x)
             results = pool.map(solve_single_ocp, initial_states)
         end_time = time.time()
 
-        # 3. Filter valid results
+        # 3. Filter valid results (where solver converged)
         valid_data = [res for res in results if res is not None]
         
         if len(valid_data) == 0:
             print("Nessuna soluzione valida trovata. Controlla il solver o i vincoli.")
             return
 
-        x_data = np.array([res[0] for res in valid_data])
-        y_data = np.array([res[1] for res in valid_data])
+        x_data = np.array([res[0] for res in valid_data]) # Initial states
+        y_data = np.array([res[1] for res in valid_data]) # Optimal costs (Value function)
 
         print(f'The dataset generation took {end_time - start_time:.2f} [s], with {len(valid_data)} valid solutions')
         print(f'First 50 points of the dataset (x_init, V*):')
         for i in range(min(50, len(valid_data))):
             print(f"  x_init[{i}]: {x_data[i]}, V*[{i}]: {y_data[i]}")
-        # Salve dataset
+        # Save dataset for future use
         os.makedirs(MODEL_DIR, exist_ok=True)
         np.savez(os.path.join(MODEL_DIR, 'value_function_data_grid.npz'), x_init=x_data, V_opt=y_data)
     else:
+        # Load existing dataset
         data = np.load(LOAD_DATA_PATH)
         x_data = data['x_init']
         y_data = data['V_opt']
@@ -151,7 +200,7 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, M=20, N_long=100,
         torch.manual_seed(seed)
         random.seed(seed)
     
-    # Check if model exists
+    # Check if model exists or needs to be trained
     if LOAD_MODEL_PATH is None:
         # Prefer MODEL_DIR/model.pt but keep backward compatibility with model.pt
         if os.path.exists(os.path.join(MODEL_DIR,'model.pt')):
@@ -161,12 +210,13 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, M=20, N_long=100,
 
     if LOAD_MODEL_PATH == None:
         print("Starting training...")
+        # Train neural network to approximate the Value function (Terminal Cost)
         tcost_model = train_network(x_data, y_data, save_dir=MODEL_DIR)
     else:
         print(f"Loading model from {LOAD_MODEL_PATH}")
         checkpoint = torch.load(LOAD_MODEL_PATH)
         model_state_dict = checkpoint['model']
-        ub_val = checkpoint['ub']
+        ub_val = checkpoint['ub'] # Normalization/scaling constant if used
 
         tcost_model = NeuralNetwork(input_dim, 64, output_dim, ub=ub_val).to(device)
         tcost_model.load_state_dict(model_state_dict)
@@ -189,11 +239,13 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, M=20, N_long=100,
             os.makedirs(save, exist_ok=True)
             
         import copy
+        # Ensure model is on CPU for multiprocessing sharing (pickling)
         tcost_cpu = copy.deepcopy(tcost_model).cpu()
         
         sim_args = []
         T_val = sim_T if sim_T else T
         
+        # Prepare arguments for parallel workers
         for i in range(sim_tests):
              seed_i = seed if seed is not None else None
              sim_args.append((i, seed_i, tcost_cpu, M, N_long, T_val))
@@ -201,18 +253,20 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, M=20, N_long=100,
         print(f"Starting parallel simulations ({sim_tests}) on {NUM_CORES} cores...")
         start_time_all = time.time()
         
+        # Execute simulations in parallel
         with multiprocessing.Pool(processes=NUM_CORES) as pool:
              results_list = pool.map(run_simulation_instance, sim_args)
         
         print(f"Simulations completed in {time.time() - start_time_all:.2f}s.")
         
         # Process results
-        for i, (idx, _, res_dict) in enumerate(results_list):
+        for i, (_, _, res_dict) in enumerate(results_list):
             is_last = (i == len(results_list) - 1)
             
             for c in controllers:
                 res = res_dict.get(c)
                 if res is None:
+                    # Record failure (NaN)
                     sim_results[c].append(float('nan'))
                     sim_exec_times[c].append(float('nan'))
                     continue
@@ -223,21 +277,20 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, M=20, N_long=100,
                 sim_results[c].append(total_cost)
                 sim_exec_times[c].append(exec_time_val)
                 
-                # Only save details for the LAST simulation to avoid clutter
+                # Only save detailed trajectory data for the LAST simulation to avoid clutter
                 if is_last:
-                     # Save trajectory, controls ...
+                     # Save trajectory, controls, etc.
                      traj = np.array(res['trajectory'])
                      controls = np.array(res['controls'])
                      predicted_trajs = res.get('predicted_trajs', [])
                      predicted_us = res.get('predicted_us', [])
                      reference = res.get('reference_traj', None)
                      
-                     if traj.ndim == 1: traj = traj.reshape(1, -1) if len(traj.shape)>0 else traj # Should not happen for valid traj
+                     if traj.ndim == 1: traj = traj.reshape(1, -1) if len(traj.shape)>0 else traj 
                      if controls.ndim == 1: controls = controls.reshape(-1, 1)
 
                      t_states = np.arange(traj.shape[0]) * DT
                      t_controls = np.arange(controls.shape[0]) * DT if controls.size else np.array([])
-
                      
                      if save:
                         npz_path = os.path.join(save, f'closed_loop_{c}_data_last.npz')
@@ -245,6 +298,7 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, M=20, N_long=100,
                         print(f"  Saved last simulation data to {npz_path}")
 
                         try:
+                            # Generate comparison plots for positions, velocities, and torques
                             fig, axs = plt.subplots(3, 1, figsize=(8, 9), sharex=True)
                             # Positions
                             for j in range(NQ):
@@ -286,6 +340,7 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, M=20, N_long=100,
         print("="*50)
         
         if save:
+            # Save summary CSV with success rates, mean costs, and execution times
             summary_csv_path = os.path.join(save, 'closed_loop_summary.csv')
             with open(summary_csv_path, 'w', newline='') as f_csv:
                 csv_writer = csv.writer(f_csv)
@@ -317,10 +372,10 @@ if __name__ == "__main__":
     parser.add_argument('--load-data', type=str, default=None, help='Path to dataset (.npz)')
     parser.add_argument('--load-model', type=str, default=None, help='Path to model (.pt)')
     parser.add_argument('--M', type=int, default=10, help='Short horizon M')
-    parser.add_argument('--N-long', type=int, default=100, help='Long horizon N used in training')
+    parser.add_argument('--N', type=int, default=100, help='Long horizon N used in training')
     parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducibility')
-    parser.add_argument('--simulate', action='store_true', help='Run closed-loop MPC simulations')
-    parser.add_argument('--sim-tests', type=int, default=10, help='Number of initial states for closed-loop simulation')
+    parser.add_argument('--sim', action='store_true', help='Run closed-loop MPC simulations')
+    parser.add_argument('--Nsim', type=int, default=10, help='Number of initial states for closed-loop simulation')
     parser.add_argument('--save', type=str, default=None, help='Directory to save closed-loop simulation results')
     parser.add_argument('--robot', type=str, default=None, help='Robot selection: double_pendulum or single_pendulum')
     args = parser.parse_args()
@@ -332,5 +387,5 @@ if __name__ == "__main__":
         ))
     )
 
-    main(LOAD_DATA_PATH, LOAD_MODEL_PATH, M=args.M, N_long=args.N_long, seed=args.seed, 
-         simulate=args.simulate, sim_tests=args.sim_tests, save=args.save)
+    main(LOAD_DATA_PATH, LOAD_MODEL_PATH, M=args.M, N_long=args.N, seed=args.seed, 
+         simulate=args.sim, sim_tests=args.Nsim, save=args.save)

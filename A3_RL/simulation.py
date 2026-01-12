@@ -1,4 +1,9 @@
 """Simulation helpers: closed-loop simulation and batch comparison.
+
+This module provides the core `simulate_mpc` function, which implements the
+Model Predictive Control (MPC) loop. It sets up the optimization problem
+(using CasADi), interfaces with the robot simulator (Pinocchio or MuJoCo),
+and runs the closed-loop simulation.
 """
 import numpy as np
 import os
@@ -21,6 +26,41 @@ except ImportError:
         pass
 
 def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, N_long=100, T=T, tol=1e-3, verbose=False, steady_time=0.5, steady_error_tol=1e-2):
+    """
+    Runs a closed-loop MPC simulation for a given controller configuration.
+
+    This function constructs and solves an Optimal Control Problem (OCP) at each
+    time step, applies the first control action, steps the simulator, and repeats.
+    It supports three controller modes:
+    - 'M': Standard MPC with a short horizon M.
+    - 'M_term': MPC with a short horizon M and a learned terminal cost function.
+    - 'N+M' (or other): Baseline MPC with a long horizon (N_long + M).
+
+    Args:
+        x0 (np.ndarray): Initial state vector [q, dq].
+        controller (str): Controller type ('M', 'M_term', or 'N+M').
+        tcost_model (NeuralNetwork, optional): PyTorch model for terminal cost (used if controller='M_term').
+        terminal_cost_fn (casadi.Function, optional): Pre-compiled CasADi function for terminal cost.
+        M (int, optional): Short prediction horizon length. Defaults to 20.
+        N_long (int, optional): Long prediction horizon length (for baseline). Defaults to 100.
+        T (int, optional): Total simulation duration in time steps. Defaults to global T.
+        tol (float, optional): Solver tolerance. Defaults to 1e-3.
+        verbose (bool, optional): Whether to print debug info. Defaults to False.
+        steady_time (float, optional): Time (in seconds) to stay within error tolerance to trigger early stop.
+        steady_error_tol (float, optional): Error tolerance for early stopping.
+
+    Returns:
+        dict: A dictionary containing simulation results:
+            - 'total_cost': Sum of running costs.
+            - 'trajectory': Array of visited states (T+1 x NX).
+            - 'controls': Array of applied controls (T x NU).
+            - 'predicted_trajs': List of predicted trajectories at each step.
+            - 'predicted_us': List of predicted control sequences at each step.
+            - 'reference_traj': Reference trajectory (constructed from predictions).
+            - 'stopped_early': Boolean indicating if simulation stopped due to convergence.
+            - 'stop_time': Time at which simulation stopped (if stopped_early).
+            - 'exec_time': List of solver execution times per step.
+    """
     print("Load robot model")
     # Load the double pendulum
     if PENDULUM == 'single_pendulum':
@@ -109,34 +149,40 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, 
         
     print("Create optimization parameters")
     opti = cs.Opti()
-    param_x_init = opti.parameter(nx)
-    param_q_des = opti.parameter(nq)
+    param_x_init = opti.parameter(nx) # Initial state parameter (updated every MPC step)
+    param_q_des = opti.parameter(nq)  # Desired position parameter
     cost = 0
 
+    # ---------------------------------------------------------
+    # System Dynamics & Integration
+    # ---------------------------------------------------------
     # create the dynamics function
     q   = cs.SX.sym('q', nq)
     dq  = cs.SX.sym('dq', nq)
     ddq = cs.SX.sym('ddq', nq)
     state = cs.vertcat(q, dq)
     rhs    = cs.vertcat(dq, ddq)
-    f = cs.Function('f', [state, ddq], [rhs])
+    f = cs.Function('f', [state, ddq], [rhs]) # Simple integrator f(x, u) -> x_next
 
-    # create a Casadi inverse dynamics function
-    H_b = cs.SX.eye(4)     # base configuration
-    v_b = cs.SX.zeros(6)   # base velocity
+    # create a Casadi inverse dynamics function (Pinocchio interface)
+    H_b = cs.SX.eye(4)     # base configuration (identity for fixed base)
+    v_b = cs.SX.zeros(6)   # base velocity (zero for fixed base)
     bias_forces = kinDyn.bias_force_fun()
     mass_matrix = kinDyn.mass_matrix_fun()
-    # discard the first 6 elements because they are associated to the robot base
+    
+    # discard the first 6 elements because they are associated to the robot base (which is fixed)
     h = bias_forces(H_b, q, v_b, dq)[6:]
     MM = mass_matrix(H_b, q)[6:,6:]
     tau = MM @ ddq + h
     inv_dyn = cs.Function('inv_dyn', [state, ddq], [tau])
 
-    # create all the decision variables
+    # ---------------------------------------------------------
+    # Decision Variables
+    # ---------------------------------------------------------
     X, U = [], []
     X += [opti.variable(nx)] # do not apply pos/vel bounds on initial state
     
-    horizon = 0
+    # Determine the horizon length based on the controller type
     if controller == 'M':
         horizon = M
     elif controller == 'M_term':
@@ -144,6 +190,7 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, 
     else:
         horizon = N_long + M
     
+    # Create variables for the prediction horizon
     # --- FIX: These loops were commented out, causing X and U to be too short/empty ---
     for k in range(1, horizon+1): 
         X += [opti.variable(nx)]
@@ -153,16 +200,25 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, 
 
     print("Add initial conditions")
     opti.subject_to(X[0] == param_x_init)
+    
+    # Cost function and Dynamics constraints
     for k in range(horizon):     
+        # Quadratic Running Cost
         cost += w_p * (X[k][:nq] - param_q_des).T @ (X[k][:nq] - param_q_des)
         cost += w_v * X[k][nq:].T @ X[k][nq:]
         cost += w_a * U[k].T @ U[k]
 
+        # Dynamics constraint: x_{k+1} = x_k + dt * f(x_k, u_k)
+        # Note: U[k] here represents acceleration (ddq), not torque. 
+        # The torque limit is enforced via _enforce_actuation which likely maps ddq -> tau
         opti.subject_to(X[k+1] == X[k] + DT * f(X[k], U[k]))
+        
+        # Actuation limits (torque limits)
         _enforce_actuation(opti, U[k])
 
     # Optional terminal cost
     if controller == 'M_term':
+        # Add learned terminal cost V(x_N)
         if terminal_cost_fn is not None:
              cost += terminal_cost_fn(X[horizon])
         elif tcost_model is not None:

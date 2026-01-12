@@ -9,6 +9,13 @@ from config import NQ, NX, NU, W_Q, W_V, W_U, TORQUE_LIMIT, KINDYN, ROBOT
 
 
 def _enforce_actuation(opti, U_k):
+    """
+    Applies torque limits to the control variable U_k in the optimization problem.
+
+    Args:
+        opti (casadi.Opti): The optimization problem instance.
+        U_k (casadi.MX): The control variable at step k.
+    """
     try:
         for j in range(NU):
             opti.subject_to(U_k[j] <= TORQUE_LIMIT)
@@ -18,6 +25,27 @@ def _enforce_actuation(opti, U_k):
 
 
 def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_control=False):
+    """
+    Solves the Optimal Control Problem (OCP) for a given initial state.
+
+    This function configures and solves a trajectory optimization problem using CasADi and IPOPT.
+    It minimizes a cost function composed of quadratic state and control costs, and optionally
+    a learned terminal cost.
+
+    Args:
+        x_init (np.ndarray): The initial state vector [q, dq].
+        N (int, optional): The prediction horizon. Defaults to 100.
+        terminal_model (casadi.Function, optional): A CasADi function representing the terminal cost V(x_N).
+        return_xN (bool, optional): If True, returns the final state x_N. Used for bootstrapping.
+        return_first_control (bool, optional): If True, returns the first control action u_0 and predicted trajectories. Used for MPC.
+
+    Returns:
+        tuple or None:
+            - If return_first_control is True: (u_0, predicted_trajectory, predicted_controls)
+            - If return_xN is True: (x_init, optimal_cost, x_N)
+            - Otherwise: (x_init, optimal_cost)
+            - Returns None if the solver fails.
+    """
 
     SOLVER_TOLERANCE = 1e-4
     SOLVER_MAX_ITER = 1000
@@ -59,51 +87,72 @@ def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_
     param_q_des = opti.parameter(NQ)
     cost = 0
 
-    # create the dynamics function: inputs are state and torque (tau)
+    # ---------------------------------------------------------
+    # System Dynamics (Pinocchio + CasADi AD)
+    # ---------------------------------------------------------
+    # Create symbolic variables for the dynamics function
     q   = cs.SX.sym('q', NQ)
     dq  = cs.SX.sym('dq', NQ)
-    tau_sym = cs.SX.sym('tau', NQ)
+    tau_sym = cs.SX.sym('tau', NQ) # Control input (torque)
     state = cs.vertcat(q, dq)
 
-    # create a Casadi inverse dynamics building blocks
-    H_b = cs.SX.eye(4)     # base configuration
-    v_b = cs.SX.zeros(6)   # base velocity
+    # Robot Physical Parameters and Dynamics
+    H_b = cs.SX.eye(4)     # base configuration (identity)
+    v_b = cs.SX.zeros(6)   # base velocity (zero)
     bias_forces = KINDYN.bias_force_fun()
     mass_matrix = KINDYN.mass_matrix_fun()
-    # discard the first 6 elements because they are associated to the robot base
+    
+    # Calculate terms for the equation of motion: M(q)ddq + h(q, dq) = tau
+    # We discard the first 6 elements as they correspond to the fixed base
     h = bias_forces(H_b, q, v_b, dq)[6:]
     MM = mass_matrix(H_b, q)[6:,6:]
 
-    # acceleration from torque: ddq = MM^{-1} * (tau - h)
+    # Forward Dynamics: ddq = M^{-1} * (tau - h)
     ddq_from_tau = cs.inv(MM) @ (tau_sym - h)
     rhs = cs.vertcat(dq, ddq_from_tau)
 
-    # dynamics function mapping (x, tau) -> xdot
+    # Discrete Time Dynamics Function f(x, u) -> x_next
+    # Note: This will be used in the Euler integration step X[k+1] = X[k] + dt * f(X[k], U[k])
     f = cs.Function('f', [state, tau_sym], [rhs])
 
-    # create all the decision variables
+    # ---------------------------------------------------------
+    # Decision Variables
+    # ---------------------------------------------------------
     X, U = [], []
     X += [opti.variable(NX)] # do not apply pos/vel bounds on initial state
     for k in range(1, N+1): 
         X += [opti.variable(NX)]
-        # opti.subject_to( opti.bounded(lbx, X[-1], ubx) )
     for k in range(N): 
         U += [opti.variable(NU)]
 
     print("Add initial conditions")
     opti.subject_to(X[0] == param_x_init)
 
+    # ---------------------------------------------------------
+    # Cost & Constraints Loop
+    # ---------------------------------------------------------
     for k in range(N):     
-        # print("Compute cost function")
+        # Quadratic Running Cost: 
+        # J_k = w_p * ||q - q_des||^2 + w_v * ||dq||^2 + w_u * ||u||^2
         cost += w_p * (X[k][:NQ] - param_q_des).T @ (X[k][:NQ] - param_q_des)
         cost += w_v * X[k][NQ:].T @ X[k][NQ:]
         cost += w_a * U[k].T @ U[k]
 
-        opti.subject_to(X[k+1] == f(X[k], U[k]))
+        # Dynamics constraints (Simple Euler integration)
+        opti.subject_to(X[k+1] == X[k] + DT * f(X[k], U[k]))
 
-        # torque bounds: controls are torques, so bound U directly
+        # Torque limits
         _enforce_actuation(opti, U[k])
     
+    # ---------------------------------------------------------
+    # Terminal Cost
+    # ---------------------------------------------------------
+    # Standard quadratic terminal cost
+    cost += w_p * (X[N][:NQ] - param_q_des).T @ (X[N][:NQ] - param_q_des)
+    cost += w_v * X[N][NQ:].T @ X[N][NQ:]
+    
+    # Learned Terminal Cost (Value Function Approximation)
+    # If provided, this allows the short-horizon OCP to approximate an infinite-horizon problem
     if terminal_model is not None:
         cost += terminal_model(X[N])
 
@@ -171,23 +220,43 @@ def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_
 
 
 # Backwards-compatible wrappers
+
 def solve_single_ocp(x_init, N=100):
+    """
+    Solves OCP and returns (x_init, optimal_cost).
+    Used for generating the Value Function dataset.
+    """
     return solve_ocp(x_init, N=N, terminal_model=None, return_xN=False, return_first_control=False)
 
 
 def solve_single_ocp_with_terminal(x_init, N=100, terminal_model=None):
+    """
+    Solves OCP with a terminal cost model. 
+    Returns (x_init, optimal_cost).
+    """
     return solve_ocp(x_init, N=N, terminal_model=terminal_model, return_xN=False, return_first_control=False)
 
 
 def solve_single_ocp_return_terminal(x_init, N=100):
+    """
+    Solves OCP and returns (x_init, optimal_cost, x_N).
+    Used for bootstrapping or analyzing the terminal state.
+    """
     return solve_ocp(x_init, N=N, terminal_model=None, return_xN=True)
 
 
 def solve_single_ocp_with_terminal_return_terminal(x_init, N=100, terminal_model=None):
+    """
+    Solves OCP with terminal model and returns (x_init, optimal_cost, x_N).
+    """
     return solve_ocp(x_init, N=N, terminal_model=terminal_model, return_xN=True)
 
 
 def solve_single_ocp_get_first_control(x_init, N=100, terminal_model=None):
+    """
+    Solves OCP and returns the first control input (u0) and predicted trajectories.
+    Standard interface for MPC/Receding Horizon Control.
+    """
     res = solve_ocp(x_init, N=N, terminal_model=terminal_model, return_first_control=True)
     if res is None:
         return None, None, None
