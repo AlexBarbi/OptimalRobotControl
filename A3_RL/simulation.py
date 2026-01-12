@@ -14,7 +14,7 @@ from example_robot_data.robots_loader import load
 from adam.casadi.computations import KinDynComputations
 import pinocchio as pin
 
-from config import DT, W_Q, W_V, W_U, T, PENDULUM
+from config import DT, W_Q, W_V, W_U, T, PENDULUM, N
 from orc.utils.robot_simulator import RobotSimulator
 from orc.utils.robot_wrapper import RobotWrapper
 
@@ -25,7 +25,7 @@ except ImportError:
     def _enforce_actuation(opti, u):
         pass
 
-def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, N_long=100, T=T, tol=1e-3, verbose=False, steady_time=0.5, steady_error_tol=1e-2):
+def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, N_long=N, T=T, tol=1e-3, verbose=False, steady_time=0.5, steady_error_tol=1e-2):
     """
     Runs a closed-loop MPC simulation for a given controller configuration.
 
@@ -61,7 +61,7 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, 
             - 'stop_time': Time at which simulation stopped (if stopped_early).
             - 'exec_time': List of solver execution times per step.
     """
-    print("Load robot model")
+    # print("Load robot model")
     # Load the double pendulum
     if PENDULUM == 'single_pendulum':
         urdf_dir = os.path.dirname(os.path.abspath(__file__))
@@ -71,7 +71,7 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, 
     else:
         robot = load(PENDULUM)
 
-    print("Create KinDynComputations object")
+    # print("Create KinDynComputations object")
     joints_name_list = [s for s in robot.model.names[1:]] # skip the first name because it is "universe"
     nq = len(joints_name_list)  # number of joints
     nx = 2*nq # size of the state variable
@@ -91,7 +91,8 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, 
     POS_BOUNDS_SCALING_FACTOR = 0.2
     qMin = POS_BOUNDS_SCALING_FACTOR * robot.model.lowerPositionLimit
     qMax = POS_BOUNDS_SCALING_FACTOR * robot.model.upperPositionLimit
-    dt_sim = DT
+    print("Position limits:", qMin, qMax)
+    dt_sim = 0.002
     # N_sim = N
     q0 = x0[:nq]  # initial joint configuration
     dq0= x0[nq:]  # initial joint velocities
@@ -147,7 +148,7 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, 
         simu.init(q0, dq0)
         simu.display(q0)
         
-    print("Create optimization parameters")
+    # print("Create optimization parameters")
     opti = cs.Opti()
     param_x_init = opti.parameter(nx) # Initial state parameter (updated every MPC step)
     param_q_des = opti.parameter(nq)  # Desired position parameter
@@ -198,7 +199,7 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, 
         U += [opti.variable(nq)]
     # ---------------------------------------------------------------------------------
 
-    print("Add initial conditions")
+    # print("Add initial conditions")
     opti.subject_to(X[0] == param_x_init)
     
     # Cost function and Dynamics constraints
@@ -211,7 +212,8 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, 
         # Dynamics constraint: x_{k+1} = x_k + dt * f(x_k, u_k)
         # Note: U[k] here represents acceleration (ddq), not torque. 
         # The torque limit is enforced via _enforce_actuation which likely maps ddq -> tau
-        opti.subject_to(X[k+1] == X[k] + DT * f(X[k], U[k]))
+        # opti.subject_to(X[k+1] == X[k] + DT * f(X[k], U[k]))
+        opti.subject_to(X[k+1] == f(X[k], U[k]))
         
         # Actuation limits (torque limits)
         _enforce_actuation(opti, U[k])
@@ -229,10 +231,11 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, 
 
     opti.minimize(cost)
 
-    print("Create the optimization problem")
+    # print("Create the optimization problem")
     opts = {
         "error_on_fail": False,
         "ipopt.print_level": 0,
+        "ipopt.sb": "yes",
         "ipopt.tol": SOLVER_TOLERANCE,
         "ipopt.constr_viol_tol": SOLVER_TOLERANCE,
         "ipopt.compl_inf_tol": SOLVER_TOLERANCE,
@@ -272,7 +275,7 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, 
     steady_counter = 0
     steady_steps_required = max(1, int(np.ceil(steady_time / DT))) if steady_time and steady_time > 0 else None
 
-    print("Start the MPC loop")
+    # print("Start the MPC loop")
     for i in range(T):
         # print("\n--- MPC Iteration %d ---"%i)
         start_time = clock()

@@ -10,6 +10,7 @@ import csv
 import random
 import torch
 import warnings
+from tqdm import tqdm
 warnings.filterwarnings("ignore", category=UserWarning)
 
 from neural_network import train_network, NeuralNetwork
@@ -76,7 +77,7 @@ def run_simulation_instance(args):
         
         try:
             # delegated to simulation.simulate_mpc
-            res = simulate_mpc(test_state, controller=c, terminal_cost_fn=term_fn, M=M, N_long=N_long, T=T, verbose=False)
+            res = simulate_mpc(test_state, controller=c, terminal_cost_fn=term_fn, M=M, N_long=N, T=T, verbose=False)
         except Exception as e:
             res = None
         results[c] = res
@@ -99,7 +100,7 @@ def solve_single_ocp(x_init, N = N):
     from ocp import solve_single_ocp as _solve
     return _solve(x_init, N=N)
 
-def solve_single_ocp_with_terminal(x_init, N=100, terminal_model=None):
+def solve_single_ocp_with_terminal(x_init, N=N, terminal_model=None):
     """Wrapper delegating to `ocp.solve_single_ocp` with a terminal model."""
     from ocp import solve_ocp
     return solve_ocp(x_init, N=N, terminal_model=terminal_model)
@@ -134,8 +135,8 @@ def simulate_mpc(*args, **kwargs):
     return _impl(*args, **kwargs)
 
 
-def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, M=20, N_long=100, 
-         seed=None, simulate=True, sim_tests=20, sim_T=None, save=None):
+def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, M=10, N_long=N, 
+         seed=None, simulate=True, sim_tests=10, sim_T=None, save=None):
     """
     Main function to orchestrate data generation, model training, and MPC simulation comparisons.
 
@@ -162,7 +163,7 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, M=20, N_long=100,
         start_time = time.time()
         with multiprocessing.Pool(processes=NUM_CORES) as pool:
             # Solves optimal control problem for each state to get V*(x)
-            results = pool.map(solve_single_ocp, initial_states)
+            results = list(tqdm(pool.imap(solve_single_ocp, initial_states), total=len(initial_states), desc="Generating Data"))
         end_time = time.time()
 
         # 3. Filter valid results (where solver converged)
@@ -176,9 +177,9 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, M=20, N_long=100,
         y_data = np.array([res[1] for res in valid_data]) # Optimal costs (Value function)
 
         print(f'The dataset generation took {end_time - start_time:.2f} [s], with {len(valid_data)} valid solutions')
-        print(f'First 50 points of the dataset (x_init, V*):')
-        for i in range(min(50, len(valid_data))):
-            print(f"  x_init[{i}]: {x_data[i]}, V*[{i}]: {y_data[i]}")
+        # print(f'First 50 points of the dataset (x_init, V*):')
+        # for i in range(min(50, len(valid_data))):
+            # print(f"  x_init[{i}]: {x_data[i]}, V*[{i}]: {y_data[i]}")
         # Save dataset for future use
         os.makedirs(MODEL_DIR, exist_ok=True)
         np.savez(os.path.join(MODEL_DIR, 'value_function_data_grid.npz'), x_init=x_data, V_opt=y_data)
@@ -214,7 +215,7 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, M=20, N_long=100,
         tcost_model = train_network(x_data, y_data, save_dir=MODEL_DIR)
     else:
         print(f"Loading model from {LOAD_MODEL_PATH}")
-        checkpoint = torch.load(LOAD_MODEL_PATH)
+        checkpoint = torch.load(LOAD_MODEL_PATH, weights_only=True)
         model_state_dict = checkpoint['model']
         ub_val = checkpoint['ub'] # Normalization/scaling constant if used
 
@@ -223,12 +224,12 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, M=20, N_long=100,
         
     # --- COMPARISON LOGIC ---
     print("\n" + "="*30)
-    print("RUNNING MPC COMPARISON")
+    print("RUNNING MPC SIMULATIONS")
     print("="*30)
     
     # If simulate-only mode: skip one-shot open-loop solves and batch comparisons
     if simulate:
-        print(f"Simulate-only mode: running {sim_tests} closed-loop simulation(s).")
+        # print(f"Simulate-only mode: running {sim_tests} closed-loop simulation(s).")
         controllers = ['M', 'M_term', 'N+M']
         
         sim_results = {c: [] for c in controllers}
@@ -243,21 +244,19 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, M=20, N_long=100,
         tcost_cpu = copy.deepcopy(tcost_model).cpu()
         
         sim_args = []
-        T_val = sim_T if sim_T else T
         
         # Prepare arguments for parallel workers
         for i in range(sim_tests):
              seed_i = seed if seed is not None else None
-             sim_args.append((i, seed_i, tcost_cpu, M, N_long, T_val))
+             sim_args.append((i, seed_i, tcost_cpu, M, N_long, T))
         
         print(f"Starting parallel simulations ({sim_tests}) on {NUM_CORES} cores...")
-        start_time_all = time.time()
         
         # Execute simulations in parallel
         with multiprocessing.Pool(processes=NUM_CORES) as pool:
-             results_list = pool.map(run_simulation_instance, sim_args)
+             results_list = list(tqdm(pool.imap(run_simulation_instance, sim_args), total=len(sim_args), desc="Running Simulations"))
         
-        print(f"Simulations completed in {time.time() - start_time_all:.2f}s.")
+        # print(f"Simulations completed in {time.time() - start_time_all:.2f}s.")
         
         # Process results
         for i, (_, _, res_dict) in enumerate(results_list):

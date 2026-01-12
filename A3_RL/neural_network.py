@@ -4,6 +4,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset, random_split
 import matplotlib.pyplot as plt
 import os
+import time
 
 from tqdm import tqdm
 import l4casadi as l4
@@ -111,7 +112,7 @@ class NeuralNetwork(nn.Module):
         # Return casadi function: f(x) = y
         return cs.Function(name, [x], [y])
 
-def train_network(x_data, y_data, batch_size=32, epochs=500, lr=1e-3, save_dir='model_double'):
+def train_network(x_data, y_data, batch_size=16, epochs=1000, lr=1e-3, save_dir='model_double', patience=50):
     """
     Trains the neural network to approximate the value function.
 
@@ -122,6 +123,7 @@ def train_network(x_data, y_data, batch_size=32, epochs=500, lr=1e-3, save_dir='
         epochs (int, optional): Number of training epochs. Defaults to 500.
         lr (float, optional): Learning rate. Defaults to 1e-3.
         save_dir (str, optional): Directory to save the trained model. Defaults to 'model_double'.
+        patience (int, optional): Number of epochs to wait for improvement before early stopping. Defaults to 50.
 
     Returns:
         NeuralNetwork: The trained PyTorch model.
@@ -150,7 +152,7 @@ def train_network(x_data, y_data, batch_size=32, epochs=500, lr=1e-3, save_dir='
     ub_val = max_cost * 1.2 # Heuristic scaling factor
     
     model = NeuralNetwork(input_dim, 64, output_dim, ub=ub_val).to(device)
-
+    
     # Loss function and Optimizer
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
@@ -161,7 +163,9 @@ def train_network(x_data, y_data, batch_size=32, epochs=500, lr=1e-3, save_dir='
 
     best_model = None
     best_loss  = 1e10
+    patience_counter = 0
 
+    start = time.time()
     for epoch in tqdm(range(epochs)):
         # Training phase
         model.train()
@@ -198,10 +202,18 @@ def train_network(x_data, y_data, batch_size=32, epochs=500, lr=1e-3, save_dir='
         if epoch_test_loss < best_loss:
             best_loss = epoch_test_loss
             best_model = model
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f"Early stopping at epoch {epoch+1}")
+                break
 
         if (epoch + 1) % 50 == 0:
             print(f"Epoch [{epoch+1}/{epochs}], Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_test_loss:.4f}")
-
+    end = time.time()
+    print(f"Model initialized in {end - start:.2f} seconds")
+    
     # Save the best model found
     model = best_model
     # Save both model state and scaling factor

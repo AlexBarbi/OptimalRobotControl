@@ -5,7 +5,7 @@ flexible solver with small wrappers for legacy call sites.
 """
 import casadi as cs
 import numpy as np
-from config import NQ, NX, NU, W_Q, W_V, W_U, TORQUE_LIMIT, KINDYN, ROBOT
+from config import NQ, NX, NU, W_Q, W_V, W_U, TORQUE_LIMIT, KINDYN, ROBOT, DT
 
 
 def _enforce_actuation(opti, U_k):
@@ -77,7 +77,7 @@ def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_
     w_v = W_V  # velocity weight
     w_a = W_U  # acceleration weight
 
-    print("Create optimization parameters")
+    # print("Create optimization parameters")
     ''' The parameters P contain:
         - the initial state (first 12 values)
         - the target configuration (last 6 values)
@@ -125,7 +125,7 @@ def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_
     for k in range(N): 
         U += [opti.variable(NU)]
 
-    print("Add initial conditions")
+    # print("Add initial conditions")
     opti.subject_to(X[0] == param_x_init)
 
     # ---------------------------------------------------------
@@ -158,10 +158,11 @@ def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_
 
     opti.minimize(cost)
 
-    print("Create the optimization problem")
+    # print("Create the optimization problem")
     opts = {
         "error_on_fail": False,
         "ipopt.print_level": 0,
+        "ipopt.sb": "yes",
         "ipopt.tol": SOLVER_TOLERANCE,
         "ipopt.constr_viol_tol": SOLVER_TOLERANCE,
         "ipopt.compl_inf_tol": SOLVER_TOLERANCE,
