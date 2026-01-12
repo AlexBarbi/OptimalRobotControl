@@ -1,19 +1,15 @@
 """Simulation helpers: closed-loop simulation and batch comparison.
 """
 import numpy as np
-import time
 import os
-import matplotlib.pyplot as plt
 import casadi as cs
 from time import time as clock
 from termcolor import colored
-
 from example_robot_data.robots_loader import load
 from adam.casadi.computations import KinDynComputations
 import pinocchio as pin
-# Import your local modules
-from config import NQ, NU, DT, W_Q, W_V, W_U, N, T, PENDULUM
-# import orc.optimal_control.casadi_adam.conf_ur5 as conf_ur5 # Removed to avoid dimension mismatch
+
+from config import DT, W_Q, W_V, W_U, T, PENDULUM
 from orc.utils.robot_simulator import RobotSimulator
 from orc.utils.robot_wrapper import RobotWrapper
 
@@ -21,11 +17,10 @@ from orc.utils.robot_wrapper import RobotWrapper
 try:
     from ocp import _enforce_actuation
 except ImportError:
-    # Fallback if ocp.py is missing or function is not defined
     def _enforce_actuation(opti, u):
         pass
 
-def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=T, tol=1e-3, verbose=False, steady_time=0.5, steady_error_tol=1e-2):
+def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, N_long=100, T=T, tol=1e-3, verbose=False, steady_time=0.5, steady_error_tol=1e-2):
     print("Load robot model")
     # Load the double pendulum
     if PENDULUM == 'single_pendulum':
@@ -54,12 +49,10 @@ def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=T, tol=1e
 
     SIMULATOR = "pinocchio" #"mujoco" or "pinocchio" or "ideal"
     POS_BOUNDS_SCALING_FACTOR = 0.2
-    VEL_BOUNDS_SCALING_FACTOR = 2.0
     qMin = POS_BOUNDS_SCALING_FACTOR * robot.model.lowerPositionLimit
     qMax = POS_BOUNDS_SCALING_FACTOR * robot.model.upperPositionLimit
-    vMax = VEL_BOUNDS_SCALING_FACTOR * robot.model.velocityLimit
     dt_sim = DT
-    N_sim = N
+    # N_sim = N
     q0 = x0[:nq]  # initial joint configuration
     dq0= x0[nq:]  # initial joint velocities
 
@@ -103,7 +96,7 @@ def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=T, tol=1e
             tau_viscous = np.zeros(nq)     
             
             # Viewer / Visualization flags
-            use_viewer = True          # Enable viewer
+            use_viewer = False          # Enable viewer
             which_viewer = 'meshcat'   # 'gepetto' or 'meshcat'
             viewer_name = "robot_simulator"
             show_floor = False         # Often checked in viewer init
@@ -139,12 +132,6 @@ def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=T, tol=1e
     tau = MM @ ddq + h
     inv_dyn = cs.Function('inv_dyn', [state, ddq], [tau])
 
-    # pre-compute state and torque bounds
-    lbx = qMin.tolist() + (-vMax).tolist()
-    ubx = qMax.tolist() + vMax.tolist()
-    tau_min = (-robot.model.effortLimit).tolist()
-    tau_max = robot.model.effortLimit.tolist()
-
     # create all the decision variables
     X, U = [], []
     X += [opti.variable(nx)] # do not apply pos/vel bounds on initial state
@@ -160,7 +147,6 @@ def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=T, tol=1e
     # --- FIX: These loops were commented out, causing X and U to be too short/empty ---
     for k in range(1, horizon+1): 
         X += [opti.variable(nx)]
-        # opti.subject_to( opti.bounded(lbx, X[-1], ubx) )
     for k in range(horizon): 
         U += [opti.variable(nq)]
     # ---------------------------------------------------------------------------------
@@ -173,15 +159,17 @@ def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=T, tol=1e
         cost += w_a * U[k].T @ U[k]
 
         opti.subject_to(X[k+1] == X[k] + DT * f(X[k], U[k]))
-        # opti.subject_to( opti.bounded(tau_min, inv_dyn(X[k], U[k]), tau_max))
         _enforce_actuation(opti, U[k])
 
     # Optional terminal cost
     if controller == 'M_term':
-        if tcost_model is None:
-            raise ValueError('tcost_model required for M_term controller')
-        l4_term = tcost_model.create_casadi_function()
-        cost += l4_term(X[horizon])
+        if terminal_cost_fn is not None:
+             cost += terminal_cost_fn(X[horizon])
+        elif tcost_model is not None:
+             l4_term = tcost_model.create_casadi_function()
+             cost += l4_term(X[horizon])
+        else:
+            raise ValueError('tcost_model or terminal_cost_fn required for M_term controller')
 
     opti.minimize(cost)
 
@@ -213,8 +201,6 @@ def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=T, tol=1e
     # ---------------------------------------------------------
     # Initialize Data Logging
     # ---------------------------------------------------------
-    # if T is None:
-    #     T = N_long + M
         
     traj = [x.copy()]   # Store initial state
     u_list = []
@@ -256,9 +242,6 @@ def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=T, tol=1e
         
         end_time = clock()
         exec_time.append(end_time - start_time)
-        # print("Comput. time: %.3f s"%(end_time-start_time), 
-        #     "Iters: %3d"%sol.stats()['iter_count'], 
-        #     "Tracking err: %.3f"%np.linalg.norm(q_des-x[:nq]))
         
         # ---------------------------------------------------------
         # Extract Predictions and Controls
@@ -319,16 +302,9 @@ def simulate_mpc(x0, controller, tcost_model=None, M=20, N_long=100, T=T, tol=1e
             x = np.concatenate([simu.q, simu.v])
         elif(SIMULATOR=="ideal"):
             x = sol.value(X[1])
-            # simu.display(x[:nq]) # Optional visualization
 
         # Store new state
         traj.append(x.copy())
-
-        # Check limits
-        # if( np.any(x[:nq] > qMax)):
-            # print(colored("\nUPPER POSITION LIMIT VIOLATED ON JOINTS", "red"), np.where(x[:nq]>qMax)[0])
-        # if( np.any(x[:nq] < qMin)):
-            # print(colored("\nLOWER POSITION LIMIT VIOLATED ON JOINTS", "red"), np.where(x[:nq]<qMin)[0])
     
     # ---------------------------------------------------------
     # Construct Reference Trajectory for Return

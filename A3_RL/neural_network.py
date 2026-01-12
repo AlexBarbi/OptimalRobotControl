@@ -37,22 +37,40 @@ class NeuralNetwork(nn.Module):
                 nn.init.zeros_(layer.bias)
     
     
-    def create_casadi_function(self):
+    def create_casadi_function(self, name='terminal_cost'):
         """
-        Create a l4casadi function that can be used in CasADi graphs.
+        Creates a pure CasADi implementation of the network for direct integration.
+        This avoids the overhead of calling out to PyTorch via l4casadi for simple networks.
         """
-        # Ensure model is in eval mode
+        import casadi as cs
+        
+        # Ensure model is on CPU
+        self.cpu()
         self.eval()
-        
-        # Create l4casadi model
-        # Assuming input dimension is 2*nq (from main.py config mainly, but inferred here)
-        # We need to know the input shape.
-        # The input_size is saved in self.linear_stack[0].in_features
+
         input_dim = self.linear_stack[0].in_features
+        x = cs.SX.sym('x', input_dim)
+        y = x
+
+        with torch.no_grad():
+            for layer in self.linear_stack:
+                if isinstance(layer, nn.Linear):
+                    # PyTorch Linear stores weight as (out_features, in_features)
+                    # We compute W @ x + b
+                    W = layer.weight.detach().numpy()
+                    b = layer.bias.detach().numpy()
+                    
+                    y = cs.mtimes(cs.DM(W), y) + cs.DM(b)
+                elif isinstance(layer, nn.Tanh):
+                    y = cs.tanh(y)
+                elif isinstance(layer, nn.ReLU):
+                    y = cs.fmax(0, y)
         
-        l4_model = l4.L4CasADi(self, device='cpu', name='terminal_cost')
-        
-        return l4_model
+        # Apply scaling
+        y = y * self.ub
+
+        # Return casadi function
+        return cs.Function(name, [x], [y])
 
 def train_network(x_data, y_data, batch_size=32, epochs=500, lr=1e-3, save_dir='model_double'):
     """

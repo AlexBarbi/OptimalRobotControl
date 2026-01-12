@@ -5,68 +5,36 @@ flexible solver with small wrappers for legacy call sites.
 """
 import casadi as cs
 import numpy as np
-from config import NQ, NX, NU, DT, W_Q, W_V, W_U, TORQUE_LIMIT, ACTUATED_INDICES, KINDYN, ROBOT
-
-from example_robot_data.robots_loader import load
-from adam.casadi.computations import KinDynComputations
-from orc.utils.robot_simulator import RobotSimulator
-from orc.utils.robot_loaders import loadUR
-from orc.utils.robot_wrapper import RobotWrapper
-import orc.optimal_control.casadi_adam.conf_ur5 as conf_ur5
-
-
+from config import NQ, NX, NU, W_Q, W_V, W_U, TORQUE_LIMIT, KINDYN, ROBOT
 
 
 def _enforce_actuation(opti, U_k):
     try:
         for j in range(NU):
-            if j not in ACTUATED_INDICES:
-                opti.subject_to(U_k[j] == 0)
-            else:
-                opti.subject_to(U_k[j] <= TORQUE_LIMIT)
-                opti.subject_to(U_k[j] >= -TORQUE_LIMIT)
+            opti.subject_to(U_k[j] <= TORQUE_LIMIT)
+            opti.subject_to(U_k[j] >= -TORQUE_LIMIT)
     except Exception:
         pass
 
 
 def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_control=False):
-    # print("Load robot model")
-    # robot = load("double_pendulum")
 
-    # print("Create KinDynComputations object")
-    # joints_name_list = [s for s in robot.model.names[1:]] # skip the first name because it is "universe"
-    # nq = len(joints_name_list)  # number of joints
-    # nx = 2*nq # size of the state variable
-    # kinDyn = KinDynComputations(robot.urdf, joints_name_list)
-
-    ADD_SPHERE = 0
-    SPHERE_POS = np.array([0.2, -0.10, 0.5])
-    SPHERE_SIZE = np.ones(3)*0.1
-    SPHERE_RGBA = np.array([1, 0, 0, 1.])
-
-    # WITH THIS CONFIGURATION THE SOLVER ENDS UP VIOLATING THE JOINT LIMITS
-    # ADDING THE TERMINAL CONSTRAINT FIXES EVERYTHING!
-    # BUT SO DOES:
-    # - DECREASING THE POSITION WEIGHT IN THE COST
-    # - INCREASING THE ACCELERATION WEIGHT IN THE COST
-    # - INCREASING THE MAX NUMBER OF ITERATIONS OF THE SOLVER
-    DO_WARM_START = True
     SOLVER_TOLERANCE = 1e-4
     SOLVER_MAX_ITER = 1000
 
-    SIMULATOR = "pinocchio" #"mujoco" or "pinocchio" or "ideal"
+    # SIMULATOR = "pinocchio" #"mujoco" or "pinocchio" or "ideal"
     POS_BOUNDS_SCALING_FACTOR = 0.2
-    VEL_BOUNDS_SCALING_FACTOR = 2.0
+    # VEL_BOUNDS_SCALING_FACTOR = 2.0
     qMin = POS_BOUNDS_SCALING_FACTOR * ROBOT.model.lowerPositionLimit
     qMax = POS_BOUNDS_SCALING_FACTOR * ROBOT.model.upperPositionLimit
-    vMax = VEL_BOUNDS_SCALING_FACTOR * ROBOT.model.velocityLimit
-    dt_sim = DT
-    N_sim = N
+    # vMax = VEL_BOUNDS_SCALING_FACTOR * ROBOT.model.velocityLimit
+    # dt_sim = DT
+    # N_sim = N
     # initial joint configuration and velocities (x_init is [q, dq])
     q0 = x_init[:NQ]  # initial joint configuration
     dq0 = x_init[NQ:]  # initial joint velocities
 
-    dt = 0.010 # time step MPC
+    # dt = 0.010 # time step MPC
     N = N  # time horizon MPC
     # q_des = np.array([0, -1.57, 0, 0, 0, 0]) # desired joint configuration
     if NQ == 1:
@@ -80,21 +48,6 @@ def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_
     w_p = W_Q   # position weight
     w_v = W_V  # velocity weight
     w_a = W_U  # acceleration weight
-    w_final_v = 0e0 # final velocity cost weight
-    USE_TERMINAL_CONSTRAINT = 0
-
-
-    # if(SIMULATOR=="mujoco"):
-    #     from orc.utils.mujoco_simulator import MujocoSimulator
-    #     print("Creating simulator...")
-    #     simu = MujocoSimulator("ur5", dt_sim)
-    #     simu.set_state(q0, dq0)
-    # else:
-    #     r = RobotWrapper(ROBOT.model, ROBOT.collision_model, ROBOT.visual_model)
-    #     simu = RobotSimulator(conf_ur5, r)
-    #     simu.init(q0, dq0)
-    #     simu.display(q0)
-        
 
     print("Create optimization parameters")
     ''' The parameters P contain:
@@ -128,17 +81,6 @@ def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_
     # dynamics function mapping (x, tau) -> xdot
     f = cs.Function('f', [state, tau_sym], [rhs])
 
-    # inverse dynamics (for reference): tau = MM * ddq + h
-    ddq = cs.SX.sym('ddq', NQ)
-    tau_expr = MM @ ddq + h
-    inv_dyn = cs.Function('inv_dyn', [state, ddq], [tau_expr])
-
-    # pre-compute state and torque bounds
-    lbx = qMin.tolist() + (-vMax).tolist()
-    ubx = qMax.tolist() + vMax.tolist()
-    tau_min = (-ROBOT.model.effortLimit).tolist()
-    tau_max = ROBOT.model.effortLimit.tolist()
-
     # create all the decision variables
     X, U = [], []
     X += [opti.variable(NX)] # do not apply pos/vel bounds on initial state
@@ -151,39 +93,16 @@ def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_
     print("Add initial conditions")
     opti.subject_to(X[0] == param_x_init)
 
-    # warm-start (initial guess) to improve feasibility
-    # for k in range(N+1):
-    #     try:
-    #         opti.set_initial(X[k], np.concatenate([q0, dq0]))
-    #     except Exception:
-    #         pass
-    # for k in range(N):
-    #     try:
-    #         opti.set_initial(U[k], np.zeros(NU))
-    #     except Exception:
-    #         pass
-
     for k in range(N):     
         # print("Compute cost function")
         cost += w_p * (X[k][:NQ] - param_q_des).T @ (X[k][:NQ] - param_q_des)
         cost += w_v * X[k][NQ:].T @ X[k][NQ:]
         cost += w_a * U[k].T @ U[k]
 
-        # dynamics (state update using torque -> ddq mapping)
-        # opti.subject_to(X[k+1] == X[k] + DT * f(X[k], U[k]))
         opti.subject_to(X[k+1] == f(X[k], U[k]))
 
         # torque bounds: controls are torques, so bound U directly
-        # opti.subject_to( opti.bounded(tau_min, U[k], tau_max))
-
-        # enforce actuation pattern (zero torque on unactuated joints)
         _enforce_actuation(opti, U[k])
-
-    # add the final cost
-    # cost += w_final_v * X[-1][nq:].T @ X[-1][nq:]
-
-    # if(USE_TERMINAL_CONSTRAINT):
-    #     opti.subject_to(X[-1][nq:] == 0.0)
     
     if terminal_model is not None:
         cost += terminal_model(X[N])
@@ -203,10 +122,6 @@ def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_
     }
 
     opti.solver("ipopt", opts)
-
-    # set up simulation environment
-    # if(SIMULATOR=="mujoco" and ADD_SPHERE):
-    #     simu.add_sphere(pos=SPHERE_POS, size=SPHERE_SIZE, rgba=SPHERE_RGBA)
 
     # Solve the problem to convergence the first time
     x = np.concatenate([q0, dq0])

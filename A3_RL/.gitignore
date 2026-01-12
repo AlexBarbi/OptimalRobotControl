@@ -4,6 +4,8 @@
 model_double/
 model_single/
 
+simulation_*
+
 __pycache__/*.pyc
 _l4c_generated/
 tmp_sim/
