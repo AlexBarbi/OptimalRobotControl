@@ -39,7 +39,7 @@ def run_simulation_instance(args):
     Returns:
         tuple: (idx, test_state, results) where results is a dictionary of simulation outcomes.
     """
-    idx, seed, tcost_model, M, N_long, T = args
+    idx, tcost_model, seed = args
     # Reseed to ensure different random states across workers
     pid = os.getpid()
     if seed is not None:
@@ -77,7 +77,8 @@ def run_simulation_instance(args):
         
         try:
             # delegated to simulation.simulate_mpc
-            res = simulate_mpc(test_state, controller=c, terminal_cost_fn=term_fn, M=M, N_long=N, T=T, verbose=False)
+            # print(f"Worker {pid}: Running controller {c} for test state {test_state}...")
+            res = simulate_mpc(test_state, controller=c, terminal_cost_fn=term_fn, verbose=False)
         except Exception as e:
             res = None
         results[c] = res
@@ -85,7 +86,7 @@ def run_simulation_instance(args):
     return idx, test_state, results
 
 # Configuration and constants have been moved to `config.py`
-from config import NQ, NX, NU, N, DT, NUM_SAMPLES, NUM_CORES, T, PENDULUM
+from config import NQ, NX, NU, N, DT, NUM_SAMPLES, NUM_CORES, T, PENDULUM, M, SEED
 
 # Determine model directory based on robot type
 if PENDULUM == 'single_pendulum':
@@ -95,33 +96,33 @@ else:
 
 # OCP solvers are consolidated in `ocp.py` and simulation helpers in `simulation.py`
 # Dataset helpers are in `data.py`
-def solve_single_ocp(x_init, N = N):
+def solve_single_ocp(x_init):
     """Thin wrapper delegating to `ocp.solve_single_ocp`."""
     from ocp import solve_single_ocp as _solve
-    return _solve(x_init, N=N)
+    return _solve(x_init)
 
-def solve_single_ocp_with_terminal(x_init, N=N, terminal_model=None):
-    """Wrapper delegating to `ocp.solve_single_ocp` with a terminal model."""
-    from ocp import solve_ocp
-    return solve_ocp(x_init, N=N, terminal_model=terminal_model)
-
-
-def solve_single_ocp_return_terminal(x_init, N = N):
-    """
-    Solves OCP and returns the optimal cost (Value function).
-    Wrapper for `ocp.solve_single_ocp_return_terminal`.
-    """
-    from ocp import solve_single_ocp_return_terminal as _impl
-    return _impl(x_init, N=N)
+# def solve_single_ocp_with_terminal(x_init, terminal_model=None):
+#     """Wrapper delegating to `ocp.solve_single_ocp` with a terminal model."""
+#     from ocp import solve_ocp
+#     return solve_ocp(x_init, terminal_model=terminal_model)
 
 
-def solve_single_ocp_with_terminal_return_terminal(x_init, N=N, terminal_model=None):
-    """
-    Solves OCP with a terminal cost model and returns the optimal cost.
-    Wrapper for `ocp.solve_single_ocp_with_terminal_return_terminal`.
-    """
-    from ocp import solve_single_ocp_with_terminal_return_terminal as _impl
-    return _impl(x_init, N=N, terminal_model=terminal_model)
+# def solve_single_ocp_return_terminal(x_init):
+#     """
+#     Solves OCP and returns the optimal cost (Value function).
+#     Wrapper for `ocp.solve_single_ocp_return_terminal`.
+#     """
+#     from ocp import solve_single_ocp_return_terminal as _impl
+#     return _impl(x_init)
+
+
+# def solve_single_ocp_with_terminal_return_terminal(x_init, terminal_model=None):
+#     """
+#     Solves OCP with a terminal cost model and returns the optimal cost.
+#     Wrapper for `ocp.solve_single_ocp_with_terminal_return_terminal`.
+#     """
+#     from ocp import solve_single_ocp_with_terminal_return_terminal as _impl
+#     return _impl(x_init, terminal_model=terminal_model)
 
 def generate_random_state():
     """Generates a random initial state. Wrapper for `data.generate_random_state`."""
@@ -135,8 +136,8 @@ def simulate_mpc(*args, **kwargs):
     return _impl(*args, **kwargs)
 
 
-def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, M=10, N_long=N, 
-         seed=None, simulate=True, sim_tests=10, sim_T=None, save=None):
+def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, 
+         simulate=True, sim_tests=10, save=None):
     """
     Main function to orchestrate data generation, model training, and MPC simulation comparisons.
 
@@ -157,7 +158,7 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, M=10, N_long=N,
         print(f"Starting data generation with {NUM_SAMPLES} samples on {NUM_CORES} cores.")
 
         # 1. Generate random initial states
-        initial_states = [generate_random_state() for i in range(NUM_SAMPLES)]
+        initial_states = [generate_random_state() for _ in range(NUM_SAMPLES)]
             
         # 2. Parallel Processing to solve OCP for each initial state (Value Function generation)
         start_time = time.time()
@@ -195,11 +196,11 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, M=10, N_long=N,
     output_dim = 1
 
     # Set seed if provided
-    if seed is not None:
-        print(f"Setting random seed to {seed}")
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        random.seed(seed)
+    if SEED is not None:
+        print(f"Setting random seed to {SEED}")
+        np.random.seed(SEED)
+        torch.manual_seed(SEED)
+        random.seed(SEED)
     
     # Check if model exists or needs to be trained
     if LOAD_MODEL_PATH is None:
@@ -247,15 +248,15 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, M=10, N_long=N,
         
         # Prepare arguments for parallel workers
         for i in range(sim_tests):
-             seed_i = seed if seed is not None else None
-             sim_args.append((i, seed_i, tcost_cpu, M, N_long, T))
+            #  seed_i = seed if seed is not None else None
+             sim_args.append((i, tcost_cpu, SEED))
         
         print(f"Starting parallel simulations ({sim_tests}) on {NUM_CORES} cores...")
         
         # Execute simulations in parallel
         with multiprocessing.Pool(processes=NUM_CORES) as pool:
              results_list = list(tqdm(pool.imap(run_simulation_instance, sim_args), total=len(sim_args), desc="Running Simulations"))
-        
+
         # print(f"Simulations completed in {time.time() - start_time_all:.2f}s.")
         
         # Process results
@@ -370,9 +371,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Run MPC comparison experiments')
     parser.add_argument('--load-data', type=str, default=None, help='Path to dataset (.npz)')
     parser.add_argument('--load-model', type=str, default=None, help='Path to model (.pt)')
-    parser.add_argument('--M', type=int, default=10, help='Short horizon M')
-    parser.add_argument('--N', type=int, default=100, help='Long horizon N used in training')
-    parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducibility')
+    # parser.add_argument('--M', type=int, default=10, help='Short horizon M')
+    # parser.add_argument('--N', type=int, default=100, help='Long horizon N used in training')
+    # parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducibility')
     parser.add_argument('--sim', action='store_true', help='Run closed-loop MPC simulations')
     parser.add_argument('--Nsim', type=int, default=10, help='Number of initial states for closed-loop simulation')
     parser.add_argument('--save', type=str, default=None, help='Directory to save closed-loop simulation results')
@@ -386,5 +387,4 @@ if __name__ == "__main__":
         ))
     )
 
-    main(LOAD_DATA_PATH, LOAD_MODEL_PATH, M=args.M, N_long=args.N, seed=args.seed, 
-         simulate=args.sim, sim_tests=args.Nsim, save=args.save)
+    main(LOAD_DATA_PATH, LOAD_MODEL_PATH, simulate=args.sim, sim_tests=args.Nsim, save=args.save)

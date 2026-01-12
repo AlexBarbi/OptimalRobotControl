@@ -14,7 +14,7 @@ from example_robot_data.robots_loader import load
 from adam.casadi.computations import KinDynComputations
 import pinocchio as pin
 
-from config import DT, W_Q, W_V, W_U, T, PENDULUM, N
+from config import DT, W_Q, W_V, W_U, T, PENDULUM, N, M
 from orc.utils.robot_simulator import RobotSimulator
 from orc.utils.robot_wrapper import RobotWrapper
 
@@ -25,7 +25,7 @@ except ImportError:
     def _enforce_actuation(opti, u):
         pass
 
-def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, N_long=N, T=T, tol=1e-3, verbose=False, steady_time=0.5, steady_error_tol=1e-2):
+def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbose=False, steady_time=0.5, steady_error_tol=1e-2):
     """
     Runs a closed-loop MPC simulation for a given controller configuration.
 
@@ -91,7 +91,7 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, 
     POS_BOUNDS_SCALING_FACTOR = 0.2
     qMin = POS_BOUNDS_SCALING_FACTOR * robot.model.lowerPositionLimit
     qMax = POS_BOUNDS_SCALING_FACTOR * robot.model.upperPositionLimit
-    print("Position limits:", qMin, qMax)
+    # print("Position limits:", qMin, qMax)
     dt_sim = 0.002
     # N_sim = N
     q0 = x0[:nq]  # initial joint configuration
@@ -188,8 +188,10 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, 
         horizon = M
     elif controller == 'M_term':
         horizon = M
-    else:
-        horizon = N_long + M
+    elif controller == 'N+M':
+        horizon = N + M
+    horizon -= 1
+    # print(f"Using horizon length: {horizon}")
     
     # Create variables for the prediction horizon
     # --- FIX: These loops were commented out, causing X and U to be too short/empty ---
@@ -208,12 +210,15 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, 
         cost += w_p * (X[k][:nq] - param_q_des).T @ (X[k][:nq] - param_q_des)
         cost += w_v * X[k][nq:].T @ X[k][nq:]
         cost += w_a * U[k].T @ U[k]
+        # cost += w_p * np.dot((X[k][:nq] - param_q_des), (X[k][:nq] - param_q_des))
+        # cost += w_v * np.dot(X[k][nq:], X[k][nq:])
+        # cost += w_a * np.dot(U[k], U[k])
 
         # Dynamics constraint: x_{k+1} = x_k + dt * f(x_k, u_k)
         # Note: U[k] here represents acceleration (ddq), not torque. 
         # The torque limit is enforced via _enforce_actuation which likely maps ddq -> tau
-        # opti.subject_to(X[k+1] == X[k] + DT * f(X[k], U[k]))
-        opti.subject_to(X[k+1] == f(X[k], U[k]))
+        opti.subject_to(X[k+1] == X[k] + DT * f(X[k], U[k]))
+        # opti.subject_to(X[k+1] == f(X[k], U[k]))
         
         # Actuation limits (torque limits)
         _enforce_actuation(opti, U[k])
@@ -222,10 +227,10 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, 
     if controller == 'M_term':
         # Add learned terminal cost V(x_N)
         if terminal_cost_fn is not None:
-             cost += terminal_cost_fn(X[horizon])
+             cost += terminal_cost_fn(X[horizon]) * 1000
         elif tcost_model is not None:
              l4_term = tcost_model.create_casadi_function()
-             cost += l4_term(X[horizon])
+             cost += l4_term(X[horizon]) * 1000
         else:
             raise ValueError('tcost_model or terminal_cost_fn required for M_term controller')
 
@@ -256,7 +261,6 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, 
     sol = opti.solve()
     opts["ipopt.max_iter"] = SOLVER_MAX_ITER
     opti.solver("ipopt", opts)
-
     # ---------------------------------------------------------
     # Initialize Data Logging
     # ---------------------------------------------------------
@@ -293,6 +297,7 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, 
             opti.set_initial(opti.lam_g, lam_g0)
         
         # print("Time step", i, "State", x)
+
         opti.set_value(param_x_init, x)
         try:
             sol = opti.solve()
@@ -322,31 +327,45 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, M=20, 
         # ---------------------------------------------------------
         curr_q = x[:nq]
         curr_v = x[nq:]
-        step_cost = w_p * np.sum((curr_q - q_des)**2) + \
-                    w_v * np.sum(curr_v**2) + \
-                    w_a * np.sum(u_applied**2)
-        total_cost += step_cost
+        # step_cost = w_p * np.sum((curr_q - q_des)**2) + \
+        #             w_a * np.sum(u_applied**2) + \
+        #             w_v * np.sum(curr_v**2)
+        # total_cost += step_cost
+        
+        # Costo Posizione: w_p * (q - q_des)^T (q - q_des)
+        pos_error = curr_q - q_des
+        cost_pos = w_p * np.dot(pos_error.T, pos_error)
+        
+        # Costo Velocità: w_v * v^T v
+        cost_vel = w_v * np.dot(curr_v.T, curr_v)
+        
+        # Costo Input: w_a * u^T u
+        cost_input = w_a * np.dot(u_applied.T, u_applied)
+        
+        # 4. Somma al totale
+        total_cost += (cost_pos + cost_vel + cost_input)
+        # print(f"Step {i}: Cost Pos {cost_pos:.4f}, Cost Vel {cost_vel:.4f}, Cost Input {cost_input:.4f}, Total Step Cost {cost_pos + cost_vel + cost_input:.4f}")
 
         # Check for sustained near-zero tracking error and stop simulation if met
         error_norm = np.linalg.norm(curr_q - q_des)
-        if steady_steps_required is not None:
-            if error_norm < steady_error_tol:
-                steady_counter += 1
-            else:
-                steady_counter = 0
-            if steady_counter >= steady_steps_required:
-                stopped_early = True
-                stop_iter = i
-                # If we have a predicted next state, append it so trajectory and reference lengths match
-                try:
-                    if 'pred_x' in locals() and pred_x is not None and pred_x.shape[0] >= 2:
-                        next_state = pred_x[1]
-                        traj.append(next_state.copy())
-                except Exception:
-                    pass
-                if verbose:
-                    print(colored(f"Stopping simulation at step {i} (t={i*DT:.3f}s): error {error_norm:.3e} < {steady_error_tol} for {steady_time}s", "green"))
-                break
+        # if steady_steps_required is not None:
+        #     if error_norm < steady_error_tol:
+        #         steady_counter += 1
+        #     else:
+        #         steady_counter = 0
+        #     if steady_counter >= steady_steps_required:
+        #         stopped_early = True
+        #         stop_iter = i
+        #         # If we have a predicted next state, append it so trajectory and reference lengths match
+        #         try:
+        #             if 'pred_x' in locals() and pred_x is not None and pred_x.shape[0] >= 2:
+        #                 next_state = pred_x[1]
+        #                 traj.append(next_state.copy())
+        #         except Exception:
+        #             pass
+        #         if verbose:
+        #             print(colored(f"Stopping simulation at step {i} (t={i*DT:.3f}s): error {error_norm:.3e} < {steady_error_tol} for {steady_time}s", "green"))
+        #         break
 
         # ---------------------------------------------------------
         # Step Simulator

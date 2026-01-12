@@ -22,26 +22,26 @@ NX = 2*NQ # size of the state variable
 NU = NQ  # size of the control input
 KINDYN = KinDynComputations(ROBOT.urdf, joints_name_list)
 # Actuation and limits
-TORQUE_LIMIT = getattr(ROBOT, 'umax', getattr(ROBOT, 'torque_limit', 10.0))
+TORQUE_LIMIT = getattr(ROBOT, 'umax', getattr(ROBOT, 'torque_limit', 50.0))
 
 # OCP / simulation parameters
-N = 100
+N = 50
 DT = 0.02
-M = 10
+M = 5
 
-T = 750  # Total simulation time steps
+T = 500  # Total simulation time steps
 
 # Dataset / parallelism
-NUM_SAMPLES = 1000
+NUM_SAMPLES = 10000
 NUM_CORES = multiprocessing.cpu_count()
 
 # Cost weights
-W_Q = 5000
-W_V = 1.0
-W_U = 0.1
+W_Q = 1000
+W_V = 0.1
+W_U = 1e-4
 
 # Convenience
-SEED = None
+SEED = 42
 
 __all__ = [
     'robot', 'joints_name_list', 'nq', 'nx', 'nu', 'TORQUE_LIMIT', 'ACTUATED_INDICES',

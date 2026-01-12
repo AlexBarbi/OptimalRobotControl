@@ -5,7 +5,7 @@ flexible solver with small wrappers for legacy call sites.
 """
 import casadi as cs
 import numpy as np
-from config import NQ, NX, NU, W_Q, W_V, W_U, TORQUE_LIMIT, KINDYN, ROBOT, DT
+from config import NQ, NX, NU, W_Q, W_V, W_U, TORQUE_LIMIT, KINDYN, ROBOT, DT, N
 
 
 def _enforce_actuation(opti, U_k):
@@ -24,7 +24,7 @@ def _enforce_actuation(opti, U_k):
         pass
 
 
-def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_control=False):
+def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control=False):
     """
     Solves the Optimal Control Problem (OCP) for a given initial state.
 
@@ -34,7 +34,7 @@ def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_
 
     Args:
         x_init (np.ndarray): The initial state vector [q, dq].
-        N (int, optional): The prediction horizon. Defaults to 100.
+        horizon (int, optional): The prediction horizon. Defaults to 100.
         terminal_model (casadi.Function, optional): A CasADi function representing the terminal cost V(x_N).
         return_xN (bool, optional): If True, returns the final state x_N. Used for bootstrapping.
         return_first_control (bool, optional): If True, returns the first control action u_0 and predicted trajectories. Used for MPC.
@@ -57,13 +57,13 @@ def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_
     qMax = POS_BOUNDS_SCALING_FACTOR * ROBOT.model.upperPositionLimit
     # vMax = VEL_BOUNDS_SCALING_FACTOR * ROBOT.model.velocityLimit
     # dt_sim = DT
-    # N_sim = N
+    # N_sim = horizon
     # initial joint configuration and velocities (x_init is [q, dq])
     q0 = x_init[:NQ]  # initial joint configuration
     dq0 = x_init[NQ:]  # initial joint velocities
 
     # dt = 0.010 # time step MPC
-    N = N  # time horizon MPC
+    # horizon = horizon  # time horizon MPC
     # q_des = np.array([0, -1.57, 0, 0, 0, 0]) # desired joint configuration
     if NQ == 1:
         q_des = np.array([0.0])
@@ -115,14 +115,15 @@ def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_
     # Note: This will be used in the Euler integration step X[k+1] = X[k] + dt * f(X[k], U[k])
     f = cs.Function('f', [state, tau_sym], [rhs])
 
+    horizon = N -1
     # ---------------------------------------------------------
     # Decision Variables
     # ---------------------------------------------------------
     X, U = [], []
     X += [opti.variable(NX)] # do not apply pos/vel bounds on initial state
-    for k in range(1, N+1): 
+    for k in range(1, horizon+1): 
         X += [opti.variable(NX)]
-    for k in range(N): 
+    for k in range(horizon): 
         U += [opti.variable(NU)]
 
     # print("Add initial conditions")
@@ -131,12 +132,15 @@ def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_
     # ---------------------------------------------------------
     # Cost & Constraints Loop
     # ---------------------------------------------------------
-    for k in range(N):     
+    for k in range(horizon - 1):     
         # Quadratic Running Cost: 
         # J_k = w_p * ||q - q_des||^2 + w_v * ||dq||^2 + w_u * ||u||^2
         cost += w_p * (X[k][:NQ] - param_q_des).T @ (X[k][:NQ] - param_q_des)
         cost += w_v * X[k][NQ:].T @ X[k][NQ:]
         cost += w_a * U[k].T @ U[k]
+        # cost += w_p * np.dot((X[k][:NQ] - param_q_des), (X[k][:NQ] - param_q_des))
+        # cost += w_v * np.dot(X[k][NQ:], X[k][NQ:])
+        # cost += w_a * np.dot(U[k], U[k])
 
         # Dynamics constraints (Simple Euler integration)
         opti.subject_to(X[k+1] == X[k] + DT * f(X[k], U[k]))
@@ -148,13 +152,13 @@ def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_
     # Terminal Cost
     # ---------------------------------------------------------
     # Standard quadratic terminal cost
-    cost += w_p * (X[N][:NQ] - param_q_des).T @ (X[N][:NQ] - param_q_des)
-    cost += w_v * X[N][NQ:].T @ X[N][NQ:]
+    # cost += w_p * (X[horizon][:NQ] - param_q_des).T @ (X[horizon][:NQ] - param_q_des)
+    # cost += w_v * X[horizon][NQ:].T @ X[horizon][NQ:]
     
     # Learned Terminal Cost (Value Function Approximation)
     # If provided, this allows the short-horizon OCP to approximate an infinite-horizon problem
-    if terminal_model is not None:
-        cost += terminal_model(X[N])
+    # if terminal_model is not None:
+    #     cost += terminal_model(X[horizon])
 
     opti.minimize(cost)
 
@@ -182,7 +186,7 @@ def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_
     try:
         sol = opti.solve()
     except Exception as e:
-        print("Initial solver attempt failed:\n", e)
+        print("Initial solver attempt failed:\horizon", e)
         print("Attempting a second solve with adjusted options...")
 
     opts["ipopt.max_iter"] = SOLVER_MAX_ITER
@@ -196,14 +200,14 @@ def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_
             except Exception:
                 u0 = np.zeros(NU)
             pred_traj = []
-            for k in range(N + 1):
+            for k in range(horizon + 1):
                 try:
                     pred_traj.append(np.array(sol.value(X[k])).reshape(-1))
                 except Exception:
                     pred_traj.append(np.zeros(NX))
             pred_traj = np.array(pred_traj)
             pred_us = []
-            for k in range(N):
+            for k in range(horizon):
                 try:
                     pred_us.append(np.array(sol.value(U[k])).reshape(-1))
                 except Exception:
@@ -212,7 +216,7 @@ def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_
             return u0, pred_traj, pred_us
 
         if return_xN:
-            xN = sol.value(X[N])
+            xN = sol.value(X[horizon])
             return (x_init, sol.value(cost), np.array(xN).reshape(-1))
 
         return (x_init, sol.value(cost))
@@ -222,43 +226,43 @@ def solve_ocp(x_init, N=100, terminal_model=None, return_xN=False, return_first_
 
 # Backwards-compatible wrappers
 
-def solve_single_ocp(x_init, N=100):
+def solve_single_ocp(x_init):
     """
     Solves OCP and returns (x_init, optimal_cost).
     Used for generating the Value Function dataset.
     """
-    return solve_ocp(x_init, N=N, terminal_model=None, return_xN=False, return_first_control=False)
+    return solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control=False)
 
 
-def solve_single_ocp_with_terminal(x_init, N=100, terminal_model=None):
-    """
-    Solves OCP with a terminal cost model. 
-    Returns (x_init, optimal_cost).
-    """
-    return solve_ocp(x_init, N=N, terminal_model=terminal_model, return_xN=False, return_first_control=False)
+# def solve_single_ocp_with_terminal(x_init, terminal_model=None):
+#     """
+#     Solves OCP with a terminal cost model. 
+#     Returns (x_init, optimal_cost).
+#     """
+#     return solve_ocp(x_init, horizon=horizon, terminal_model=terminal_model, return_xN=False, return_first_control=False)
 
 
-def solve_single_ocp_return_terminal(x_init, N=100):
-    """
-    Solves OCP and returns (x_init, optimal_cost, x_N).
-    Used for bootstrapping or analyzing the terminal state.
-    """
-    return solve_ocp(x_init, N=N, terminal_model=None, return_xN=True)
+# def solve_single_ocp_return_terminal(x_init):
+#     """
+#     Solves OCP and returns (x_init, optimal_cost, x_N).
+#     Used for bootstrapping or analyzing the terminal state.
+#     """
+#     return solve_ocp(x_init, terminal_model=None, return_xN=True)
 
 
-def solve_single_ocp_with_terminal_return_terminal(x_init, N=100, terminal_model=None):
-    """
-    Solves OCP with terminal model and returns (x_init, optimal_cost, x_N).
-    """
-    return solve_ocp(x_init, N=N, terminal_model=terminal_model, return_xN=True)
+# def solve_single_ocp_with_terminal_return_terminal(x_init, terminal_model=None):
+#     """
+#     Solves OCP with terminal model and returns (x_init, optimal_cost, x_N).
+#     """
+#     return solve_ocp(x_init, terminal_model=terminal_model, return_xN=True)
 
 
-def solve_single_ocp_get_first_control(x_init, N=100, terminal_model=None):
-    """
-    Solves OCP and returns the first control input (u0) and predicted trajectories.
-    Standard interface for MPC/Receding Horizon Control.
-    """
-    res = solve_ocp(x_init, N=N, terminal_model=terminal_model, return_first_control=True)
-    if res is None:
-        return None, None, None
-    return res
+# def solve_single_ocp_get_first_control(x_init, terminal_model=None):
+#     """
+#     Solves OCP and returns the first control input (u0) and predicted trajectories.
+#     Standard interface for MPC/Receding Horizon Control.
+#     """
+#     res = solve_ocp(x_init, terminal_model=terminal_model, return_first_control=True)
+#     if res is None:
+#         return None, None, None
+#     return res

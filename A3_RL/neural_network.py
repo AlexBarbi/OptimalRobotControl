@@ -1,3 +1,4 @@
+import copy
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -112,7 +113,7 @@ class NeuralNetwork(nn.Module):
         # Return casadi function: f(x) = y
         return cs.Function(name, [x], [y])
 
-def train_network(x_data, y_data, batch_size=16, epochs=1000, lr=1e-3, save_dir='model_double', patience=50):
+def train_network(x_data, y_data, batch_size=64, epochs=5000, lr=1e-4, save_dir='model_double', patience=500):
     """
     Trains the neural network to approximate the value function.
 
@@ -149,7 +150,8 @@ def train_network(x_data, y_data, batch_size=16, epochs=1000, lr=1e-3, save_dir=
     input_dim = X.shape[1]
     output_dim = 1
     max_cost = Y.max().item()
-    ub_val = max_cost * 1.2 # Heuristic scaling factor
+    ub_val = max_cost * 1.0 # Heuristic scaling factor
+    # ub_val = 1.2
     
     model = NeuralNetwork(input_dim, 64, output_dim, ub=ub_val).to(device)
     
@@ -161,7 +163,7 @@ def train_network(x_data, y_data, batch_size=16, epochs=1000, lr=1e-3, save_dir=
     train_losses = []
     test_losses = []
 
-    best_model = None
+    best_model_state = None
     best_loss  = 1e10
     patience_counter = 0
 
@@ -171,7 +173,9 @@ def train_network(x_data, y_data, batch_size=16, epochs=1000, lr=1e-3, save_dir=
         model.train()
         running_loss = 0.0
         
-        for inputs, targets in train_loader:
+        # Wrap train_loader with tqdm for batch-level progress
+        batch_loop = tqdm(train_loader, desc=f"Training Batch", leave=False)
+        for inputs, targets in batch_loop:
             inputs, targets = inputs.to(device), targets.to(device)
             
             optimizer.zero_grad()
@@ -181,6 +185,7 @@ def train_network(x_data, y_data, batch_size=16, epochs=1000, lr=1e-3, save_dir=
             optimizer.step()
             
             running_loss += loss.item() * inputs.size(0)
+            batch_loop.set_postfix({'batch_loss': f"{loss.item():.4f}"})
             
         epoch_train_loss = running_loss / train_size
         train_losses.append(epoch_train_loss)
@@ -201,7 +206,7 @@ def train_network(x_data, y_data, batch_size=16, epochs=1000, lr=1e-3, save_dir=
         # Save best model logic
         if epoch_test_loss < best_loss:
             best_loss = epoch_test_loss
-            best_model = model
+            best_model_state = model.state_dict()
             patience_counter = 0
         else:
             patience_counter += 1
@@ -215,7 +220,8 @@ def train_network(x_data, y_data, batch_size=16, epochs=1000, lr=1e-3, save_dir=
     print(f"Model initialized in {end - start:.2f} seconds")
     
     # Save the best model found
-    model = best_model
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
     # Save both model state and scaling factor
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, 'model.pt')
