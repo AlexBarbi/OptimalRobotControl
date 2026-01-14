@@ -9,12 +9,13 @@ import numpy as np
 import os
 import casadi as cs
 from time import time as clock
+import time
 from termcolor import colored
 from example_robot_data.robots_loader import load
 from adam.casadi.computations import KinDynComputations
 import pinocchio as pin
 
-from config import DT, W_Q, W_V, W_U, T, PENDULUM, N, M
+from config import DT, ROBOT, TORQUE_LIMIT, W_Q, W_V, W_U, T, PENDULUM, N, M
 from orc.utils.robot_simulator import RobotSimulator
 from orc.utils.robot_wrapper import RobotWrapper
 
@@ -70,6 +71,10 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
         robot.urdf = urdf_path
     else:
         robot = load(PENDULUM)
+        # urdf_dir = os.path.dirname(os.path.abspath(__file__))
+        # urdf_path = os.path.join(urdf_dir, 'double_pendulum_description/urdf/double_pendulum.urdf')
+        # robot = pin.RobotWrapper.BuildFromURDF(urdf_path, package_dirs=[urdf_dir])
+        # robot.urdf = urdf_path
 
     # print("Create KinDynComputations object")
     joints_name_list = [s for s in robot.model.names[1:]] # skip the first name because it is "universe"
@@ -137,7 +142,7 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
             tau_viscous = np.zeros(nq)     
             
             # Viewer / Visualization flags
-            use_viewer = False          # Enable viewer
+            use_viewer = True          # Enable viewer
             which_viewer = 'meshcat'   # 'gepetto' or 'meshcat'
             viewer_name = "robot_simulator"
             show_floor = False         # Often checked in viewer init
@@ -147,7 +152,7 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
         simu = RobotSimulator(DummyConf, r)
         simu.init(q0, dq0)
         simu.display(q0)
-        
+
     # print("Create optimization parameters")
     opti = cs.Opti()
     param_x_init = opti.parameter(nx) # Initial state parameter (updated every MPC step)
@@ -176,6 +181,10 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
     MM = mass_matrix(H_b, q)[6:,6:]
     tau = MM @ ddq + h
     inv_dyn = cs.Function('inv_dyn', [state, ddq], [tau])
+    
+    tau_min = (-robot.model.effortLimit).tolist()
+    tau_max = robot.model.effortLimit.tolist()
+    # print("Torque limits:", tau_min, tau_max)
 
     # ---------------------------------------------------------
     # Decision Variables
@@ -192,11 +201,12 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
         horizon = N + M
     horizon -= 1
     # print(f"Using horizon length: {horizon}")
-    
+    # print(robot.model.lowerPositionLimit)
     # Create variables for the prediction horizon
     # --- FIX: These loops were commented out, causing X and U to be too short/empty ---
     for k in range(1, horizon+1): 
         X += [opti.variable(nx)]
+        opti.subject_to( opti.bounded([-1.0, -1.0], X[-1][nq:], [1.0, 1.0]))
     for k in range(horizon): 
         U += [opti.variable(nq)]
     # ---------------------------------------------------------------------------------
@@ -221,7 +231,11 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
         # opti.subject_to(X[k+1] == f(X[k], U[k]))
         
         # Actuation limits (torque limits)
-        _enforce_actuation(opti, U[k])
+        # _enforce_actuation(opti, U[k])
+        
+        opti.subject_to( opti.bounded(-TORQUE_LIMIT, inv_dyn(X[k], U[k]), TORQUE_LIMIT))
+        
+
 
     # Optional terminal cost
     if controller == 'M_term':
@@ -264,7 +278,9 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
     # ---------------------------------------------------------
     # Initialize Data Logging
     # ---------------------------------------------------------
-        
+    # time.sleep(3)  
+    
+     
     traj = [x.copy()]   # Store initial state
     u_list = []
     predicted_trajs = []
@@ -276,9 +292,9 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
     # Early stop if tracking error remains below steady_error_tol for steady_time seconds
     stopped_early = False
     stop_iter = None
-    steady_counter = 0
-    steady_steps_required = max(1, int(np.ceil(steady_time / DT))) if steady_time and steady_time > 0 else None
-
+    # steady_counter = 0
+    # steady_steps_required = max(1, int(np.ceil(steady_time / DT))) if steady_time and steady_time > 0 else None
+    taus = []
     # print("Start the MPC loop")
     for i in range(T):
         # print("\n--- MPC Iteration %d ---"%i)
@@ -321,7 +337,7 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
         # Get control input to apply (first element of solution)
         u_applied = pred_u[0]
         u_list.append(u_applied)
-
+        
         # ---------------------------------------------------------
         # Compute Running Cost
         # ---------------------------------------------------------
@@ -371,7 +387,8 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
         # Step Simulator
         # ---------------------------------------------------------
         tau = inv_dyn(sol.value(X[0]), sol.value(U[0])).toarray().squeeze()
-        
+        taus.append(tau)
+        # print(f"Step {i}: Applying control (torque) {tau}")
         if(SIMULATOR=="mujoco"):
             simu.step(tau, DT)
             x = np.concatenate([simu.data.qpos, simu.data.qvel])
@@ -403,6 +420,7 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
         'predicted_trajs': predicted_trajs,
         'predicted_us': predicted_us,
         'reference_traj': reference,
+        'applied_torques': np.array(taus),
         'stopped_early': stopped_early,
         'stop_time': (stop_iter*DT) if stop_iter is not None else None,
         'exec_time': exec_time

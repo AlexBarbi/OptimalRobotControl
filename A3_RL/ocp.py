@@ -93,8 +93,10 @@ def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control
     # Create symbolic variables for the dynamics function
     q   = cs.SX.sym('q', NQ)
     dq  = cs.SX.sym('dq', NQ)
-    tau_sym = cs.SX.sym('tau', NQ) # Control input (torque)
+    ddq = cs.SX.sym('ddq', NQ)
     state = cs.vertcat(q, dq)
+    rhs    = cs.vertcat(dq, ddq)
+    f = cs.Function('f', [state, ddq], [rhs])
 
     # Robot Physical Parameters and Dynamics
     H_b = cs.SX.eye(4)     # base configuration (identity)
@@ -106,14 +108,16 @@ def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control
     # We discard the first 6 elements as they correspond to the fixed base
     h = bias_forces(H_b, q, v_b, dq)[6:]
     MM = mass_matrix(H_b, q)[6:,6:]
+    tau = MM @ ddq + h
+    inv_dyn = cs.Function('inv_dyn', [state, ddq], [tau])
 
     # Forward Dynamics: ddq = M^{-1} * (tau - h)
-    ddq_from_tau = cs.inv(MM) @ (tau_sym - h)
-    rhs = cs.vertcat(dq, ddq_from_tau)
+    # ddq_from_tau = cs.inv(MM) @ (tau_sym - h)
+    # rhs = cs.vertcat(dq, tau)
 
     # Discrete Time Dynamics Function f(x, u) -> x_next
     # Note: This will be used in the Euler integration step X[k+1] = X[k] + dt * f(X[k], U[k])
-    f = cs.Function('f', [state, tau_sym], [rhs])
+    # f = cs.Function('f', [state, tau_sym], [rhs])
 
     horizon = N -1
     # ---------------------------------------------------------
@@ -123,6 +127,7 @@ def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control
     X += [opti.variable(NX)] # do not apply pos/vel bounds on initial state
     for k in range(1, horizon+1): 
         X += [opti.variable(NX)]
+        opti.subject_to( opti.bounded([-1.0, -1.0], X[-1][NQ:], [1.0, 1.0]))
     for k in range(horizon): 
         U += [opti.variable(NU)]
 
@@ -144,9 +149,13 @@ def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control
 
         # Dynamics constraints (Simple Euler integration)
         opti.subject_to(X[k+1] == X[k] + DT * f(X[k], U[k]))
+        
+
 
         # Torque limits
-        _enforce_actuation(opti, U[k])
+        # _enforce_actuation(opti, U[k])
+        opti.subject_to( opti.bounded(-TORQUE_LIMIT, inv_dyn(X[k], U[k]), TORQUE_LIMIT))
+
     
     # ---------------------------------------------------------
     # Terminal Cost

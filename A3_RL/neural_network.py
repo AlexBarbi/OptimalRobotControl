@@ -116,7 +116,7 @@ class NeuralNetwork(nn.Module):
         # Return casadi function: f(x) = y
         return cs.Function(name, [x], [y])
 
-def train_network(x_data, y_data, batch_size=32, epochs=1000, lr=1e-4, save_dir='model_double', patience=500):
+def train_network(x_data, y_data, batch_size=32, epochs=50000, lr=1e-4, save_dir='model_double', patience=100):
     """
     Trains the neural network to approximate the value function.
 

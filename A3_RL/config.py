@@ -14,6 +14,10 @@ if PENDULUM == 'single_pendulum':
     ROBOT.urdf = urdf_path
 else:
     ROBOT = load(PENDULUM)
+    # urdf_dir = os.path.dirname(os.path.abspath(__file__))
+    # urdf_path = os.path.join(urdf_dir, 'double_pendulum_description/urdf/double_pendulum.urdf')
+    # ROBOT = pin.RobotWrapper.BuildFromURDF(urdf_path, package_dirs=[urdf_dir])
+    # ROBOT.urdf = urdf_path
 
 joints_name_list = [s for s in ROBOT.model.names[1:]] # skip the first name because it is "universe"
 NQ = len(joints_name_list)  # number of joints
@@ -22,17 +26,17 @@ NX = 2*NQ # size of the state variable
 NU = NQ  # size of the control input
 KINDYN = KinDynComputations(ROBOT.urdf, joints_name_list)
 # Actuation and limits
-TORQUE_LIMIT = getattr(ROBOT, 'umax', getattr(ROBOT, 'torque_limit', 50.0))
+TORQUE_LIMIT = getattr(ROBOT, 'umax', getattr(ROBOT, 'torque_limit', 10.0))
 
 # OCP / simulation parameters
-N = 50
+N = 100
 DT = 0.02
-M = 5
+M = 4
 
 T = 500  # Total simulation time steps
 
 # Dataset / parallelism
-NUM_SAMPLES = 5000
+NUM_SAMPLES = 1000
 NUM_CORES = multiprocessing.cpu_count()
 
 # Cost weights
@@ -41,7 +45,7 @@ W_V = 1.0
 W_U = 1e-4
 
 # Convenience
-SEED = 42
+SEED = 55
 
 __all__ = [
     'robot', 'joints_name_list', 'nq', 'nx', 'nu', 'TORQUE_LIMIT', 'ACTUATED_INDICES',

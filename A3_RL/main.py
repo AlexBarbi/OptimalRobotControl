@@ -65,6 +65,7 @@ def run_simulation_instance(args):
         print(f"Worker {pid}: Failed to create l4_model: {e}")
 
     controllers = ['M', 'M_term', 'N+M']
+    # controllers = ['M_term']
     results = {}
     
     for c in controllers:
@@ -82,6 +83,7 @@ def run_simulation_instance(args):
         except Exception as e:
             res = None
         results[c] = res
+        time.sleep(1)  # slight delay to avoid resource contention
 
     return idx, test_state, results
 
@@ -291,6 +293,7 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None,
 
                      t_states = np.arange(traj.shape[0]) * DT
                      t_controls = np.arange(controls.shape[0]) * DT if controls.size else np.array([])
+                     t_torques = np.arange(res['applied_torques'].shape[0]) * DT if 'applied_torques' in res else np.array([])
                      
                      if save:
                         npz_path = os.path.join(save, f'closed_loop_{c}_data_last.npz')
@@ -316,14 +319,22 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None,
                             axs[1].set_ylabel('velocity')
                             axs[1].legend(loc='best')
                             axs[1].grid(True)
-                            # Torques
+                            # Accelerations
                             if controls.size:
                                 for j in range(NU):
                                     axs[2].plot(t_controls, controls[:, j], label=f'u{j} (applied)')
-                            axs[2].set_ylabel('torque')
+                            axs[2].set_ylabel('acceleration')
                             axs[2].set_xlabel('time [s]')
                             axs[2].legend(loc='best')
                             axs[2].grid(True)
+                            
+                            # Torques
+                            # for j in range(NU):
+                            #         axs[3].plot(t_torques, res['applied_torques'][:, j], label=f'tau{j} (applied)')
+                            # axs[3].set_ylabel('torque')
+                            # axs[3].set_xlabel('time [s]')
+                            # axs[3].legend(loc='best')
+                            # axs[3].grid(True)
 
                             fig.suptitle(f'Closed-loop {c} (Last Sim) Total cost: {total_cost:.4f}')
                             fig.tight_layout(rect=[0, 0, 1, 0.96])

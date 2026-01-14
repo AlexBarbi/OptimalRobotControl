@@ -1,7 +1,7 @@
 """Dataset generation, bootstrapping and fine-tuning helpers."""
 import numpy as np
 
-from config import NQ
+from config import NQ, ROBOT
 
 
 def generate_random_state():
@@ -16,7 +16,8 @@ def generate_random_state():
         np.ndarray: A 1D array of size 2*NQ containing [q_1, ..., q_nq, dq_1, ..., dq_nq].
     """
     q_min, q_max = -np.pi, np.pi
-    dq_min, dq_max = -8.0, 8.0
+    dq_min, dq_max = -10, 10
+    # print("Velocity limits:", dq_min, dq_max)
     
     # Random joint positions
     q_rand = np.random.uniform(q_min, q_max, NQ)
