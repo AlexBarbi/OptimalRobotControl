@@ -32,12 +32,12 @@ M = 5
 T = 500  # Total simulation time steps
 
 # Dataset / parallelism
-NUM_SAMPLES = 10000
+NUM_SAMPLES = 5000
 NUM_CORES = multiprocessing.cpu_count()
 
 # Cost weights
-W_Q = 1000
-W_V = 0.1
+W_Q = 100
+W_V = 1.0
 W_U = 1e-4
 
 # Convenience

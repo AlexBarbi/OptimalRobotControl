@@ -18,7 +18,7 @@ class NeuralNetwork(nn.Module):
         linear_stack (nn.Sequential): The stack of linear layers and activation functions.
         ub (float): Upper bound scaling factor for the output.
     """
-    def __init__(self, input_size, hidden_size, output_size, activation=nn.Tanh(), ub=None):
+    def __init__(self, input_size, hidden_size, output_size, activation=nn.ReLU(), ub=None):
         """
         Initializes the neural network.
 
@@ -36,7 +36,7 @@ class NeuralNetwork(nn.Module):
             nn.Linear(hidden_size, hidden_size),
             activation,
             nn.Linear(hidden_size, output_size),
-            activation,
+            nn.Softplus(),
         )
         self.ub = ub if ub is not None else 1 
         self.initialize_weights()
@@ -55,7 +55,7 @@ class NeuralNetwork(nn.Module):
         # This check is crucial when passing CasADi expressions that might be dimensioned as column vectors
         if x.dim() == 2 and x.shape[1] == 1 and x.shape[0] == self.linear_stack[0].in_features:
             x = x.T
-        out = self.linear_stack(x) * self.ub
+        out = self.linear_stack(x) # * self.ub
         return out
    
     def initialize_weights(self):
@@ -89,7 +89,7 @@ class NeuralNetwork(nn.Module):
         self.eval()
 
         input_dim = self.linear_stack[0].in_features
-        x = cs.SX.sym('x', input_dim)
+        x = cs.SX.sym('x', input_dim, 1)
         y = x
 
         # Reconstruct the feedforward pass using CasADi operations
@@ -99,21 +99,24 @@ class NeuralNetwork(nn.Module):
                     # PyTorch Linear stores weight as (out_features, in_features)
                     # We compute y = W @ x + b
                     W = layer.weight.detach().numpy()
-                    b = layer.bias.detach().numpy()
+                    b = layer.bias.detach().numpy().reshape(-1, 1)
                     
                     y = cs.mtimes(cs.DM(W), y) + cs.DM(b)
                 elif isinstance(layer, nn.Tanh):
                     y = cs.tanh(y)
                 elif isinstance(layer, nn.ReLU):
-                    y = cs.fmax(0, y)
+                    eps = 1e-4
+                    y = (y + cs.sqrt(y**2 + eps)) / 2.0
+                elif isinstance(layer, nn.Softplus):
+                    y = cs.if_else(y > 20, y, cs.log(1 + cs.exp(y)))
         
         # Apply scaling
-        y = y * self.ub
+        # y = y * self.ub
 
         # Return casadi function: f(x) = y
         return cs.Function(name, [x], [y])
 
-def train_network(x_data, y_data, batch_size=64, epochs=5000, lr=1e-4, save_dir='model_double', patience=500):
+def train_network(x_data, y_data, batch_size=32, epochs=1000, lr=1e-4, save_dir='model_double', patience=500):
     """
     Trains the neural network to approximate the value function.
 
@@ -150,10 +153,10 @@ def train_network(x_data, y_data, batch_size=64, epochs=5000, lr=1e-4, save_dir=
     input_dim = X.shape[1]
     output_dim = 1
     max_cost = Y.max().item()
-    ub_val = max_cost * 1.0 # Heuristic scaling factor
-    # ub_val = 1.2
+    # ub_val = max_cost * 1.0 # Heuristic scaling factor
+    ub_val = 1.0
     
-    model = NeuralNetwork(input_dim, 64, output_dim, ub=ub_val).to(device)
+    model = NeuralNetwork(input_dim, 128, output_dim, ub=ub_val).to(device)
     
     # Loss function and Optimizer
     criterion = nn.MSELoss()
@@ -168,13 +171,14 @@ def train_network(x_data, y_data, batch_size=64, epochs=5000, lr=1e-4, save_dir=
     patience_counter = 0
 
     start = time.time()
-    for epoch in tqdm(range(epochs)):
+    for epoch in tqdm(range(epochs), desc="Training Progress"):
         # Training phase
         model.train()
         running_loss = 0.0
         
         # Wrap train_loader with tqdm for batch-level progress
-        batch_loop = tqdm(train_loader, desc=f"Training Batch", leave=False)
+        total_samples = 0
+        batch_loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False)
         for inputs, targets in batch_loop:
             inputs, targets = inputs.to(device), targets.to(device)
             
@@ -182,42 +186,50 @@ def train_network(x_data, y_data, batch_size=64, epochs=5000, lr=1e-4, save_dir=
             outputs = model(inputs)
             loss = criterion(outputs, targets)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             
             running_loss += loss.item() * inputs.size(0)
-            batch_loop.set_postfix({'batch_loss': f"{loss.item():.4f}"})
+            total_samples += inputs.size(0)  # Track actual sample count
             
-        epoch_train_loss = running_loss / train_size
-        train_losses.append(epoch_train_loss)
+        epoch_train_loss = running_loss / total_samples  # Use actual count
 
         # Validation phase
         model.eval()
         running_test_loss = 0.0
+        total_test_samples = 0  # ADD THIS
         with torch.no_grad():
             for inputs, targets in test_loader:
                 inputs, targets = inputs.to(device), targets.to(device)
                 outputs = model(inputs)
                 loss = criterion(outputs, targets)
                 running_test_loss += loss.item() * inputs.size(0)
-        
-        epoch_test_loss = running_test_loss / test_size
+                total_test_samples += inputs.size(0)  # ADD THIS
+
+        epoch_test_loss = running_test_loss / total_test_samples  # Use actual count
         test_losses.append(epoch_test_loss)
 
         # Save best model logic
         if epoch_test_loss < best_loss:
             best_loss = epoch_test_loss
-            best_model_state = model.state_dict()
+            best_model_state = model.state_dict().copy()  # Create explicit copy
             patience_counter = 0
+            if (epoch + 1) % 50 == 0:
+                print(f"Epoch [{epoch+1}/{epochs}], Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_test_loss:.4f} *")
         else:
             patience_counter += 1
+            if (epoch + 1) % 50 == 0:
+                print(f"Epoch [{epoch+1}/{epochs}], Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_test_loss:.4f}")
+            
             if patience_counter >= patience:
-                print(f"Early stopping at epoch {epoch+1}")
+                print(f"Early stopping triggered at epoch {epoch+1}")
+                print(f"Best validation loss: {best_loss:.4f}")
                 break
 
-        if (epoch + 1) % 50 == 0:
-            print(f"Epoch [{epoch+1}/{epochs}], Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_test_loss:.4f}")
     end = time.time()
-    print(f"Model initialized in {end - start:.2f} seconds")
+    print(f"\nTraining completed in {end - start:.2f} seconds")
+    print(f"Final train loss: {epoch_train_loss:.4f}, Final val loss: {epoch_test_loss:.4f}")
+    print(f"Best validation loss: {best_loss:.4f}")
     
     # Save the best model found
     if best_model_state is not None:

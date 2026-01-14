@@ -220,7 +220,7 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None,
         model_state_dict = checkpoint['model']
         ub_val = checkpoint['ub'] # Normalization/scaling constant if used
 
-        tcost_model = NeuralNetwork(input_dim, 64, output_dim, ub=ub_val).to(device)
+        tcost_model = NeuralNetwork(input_dim, 128, output_dim, ub=ub_val).to(device)
         tcost_model.load_state_dict(model_state_dict)
         
     # --- COMPARISON LOGIC ---

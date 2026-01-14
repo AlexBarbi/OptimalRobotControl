@@ -227,10 +227,10 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
     if controller == 'M_term':
         # Add learned terminal cost V(x_N)
         if terminal_cost_fn is not None:
-             cost += terminal_cost_fn(X[horizon]) * 1000
+             cost += terminal_cost_fn(X[horizon])
         elif tcost_model is not None:
              l4_term = tcost_model.create_casadi_function()
-             cost += l4_term(X[horizon]) * 1000
+             cost += l4_term(X[horizon])
         else:
             raise ValueError('tcost_model or terminal_cost_fn required for M_term controller')
 
