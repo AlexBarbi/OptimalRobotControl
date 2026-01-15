@@ -263,7 +263,7 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
     # ---------------------------------------------------------
     # Initialize Data Logging
     # ---------------------------------------------------------
-    # time.sleep(3)  
+    time.sleep(3)  
     
      
     traj = [x.copy()]   # Store initial state
