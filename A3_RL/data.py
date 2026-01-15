@@ -4,24 +4,17 @@ import numpy as np
 from config import NQ, ROBOT
 
 
-def generate_random_state():
+def generate_random_state(q_min, q_max, dq_max):
     """
     Generates a random state vector for the robot.
-    
-    The state consists of joint positions (q) and joint velocities (dq).
-    - Positions are sampled uniformly from [-pi, pi].
-    - Velocities are sampled uniformly from [-8.0, 8.0].
-
-    Returns:
-        np.ndarray: A 1D array of size 2*NQ containing [q_1, ..., q_nq, dq_1, ..., dq_nq].
     """
-    q_min, q_max = -np.pi, np.pi
-    dq_min, dq_max = -10, 10
-    # print("Velocity limits:", dq_min, dq_max)
-    
-    # Random joint positions
-    q_rand = np.random.uniform(q_min, q_max, NQ)
-    # Random joint velocities
-    dq_rand = np.random.uniform(dq_min, dq_max, NQ)
-    
+    q_min = np.asarray(q_min)
+    q_max = np.asarray(q_max)
+    dq_max = np.asarray(dq_max)
+
+    assert q_min.shape == q_max.shape == dq_max.shape, "q_min, q_max, and dq_max must have the same shape"
+
+    q_rand = np.random.uniform(low=q_min, high=q_max)
+    dq_rand = np.random.uniform(low=-dq_max, high=dq_max)
+
     return np.concatenate([q_rand, dq_rand])

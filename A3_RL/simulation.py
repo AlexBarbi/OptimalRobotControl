@@ -10,12 +10,11 @@ import os
 import casadi as cs
 from time import time as clock
 import time
-from termcolor import colored
 from example_robot_data.robots_loader import load
 from adam.casadi.computations import KinDynComputations
 import pinocchio as pin
 
-from config import DT, ROBOT, TORQUE_LIMIT, W_Q, W_V, W_U, T, PENDULUM, N, M
+from config import DT, VELOCITY_LIMIT, TORQUE_LIMIT, W_P, W_V, W_A, T, PENDULUM, N, M, VIEWER
 from orc.utils.robot_simulator import RobotSimulator
 from orc.utils.robot_wrapper import RobotWrapper
 
@@ -80,7 +79,6 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
     joints_name_list = [s for s in robot.model.names[1:]] # skip the first name because it is "universe"
     nq = len(joints_name_list)  # number of joints
     nx = 2*nq # size of the state variable
-    nu = nq  # size of the control input
     kinDyn = KinDynComputations(robot.urdf, joints_name_list)
 
     ADD_SPHERE = 0
@@ -97,27 +95,22 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
     qMin = POS_BOUNDS_SCALING_FACTOR * robot.model.lowerPositionLimit
     qMax = POS_BOUNDS_SCALING_FACTOR * robot.model.upperPositionLimit
     # print("Position limits:", qMin, qMax)
+    
+    # TODO: CHECK
     dt_sim = 0.002
-    # N_sim = N
-    q0 = x0[:nq]  # initial joint configuration
-    dq0= x0[nq:]  # initial joint velocities
+    # dt_sim = DT
+    
+    q0 = x0[:nq]
+    dq0 = np.zeros(nq)
+    # x0 = np.concatenate([q0, dq0])
 
     # MPC parameters
     # q_des = np.array([0.0, np.pi])
     if nq == 1:
         q_des = np.array([0.0])
     else:
-        q_des = np.array([0.0, np.pi])
+        q_des = np.array([0.0, 0.0])
 
-    J = 1
-    # Check if J is within bounds for this robot (Double pendulum has nq=2)
-    if J < nq:
-        q_des[J] = qMin[J] + 0.01*(qMax[J] - qMin[J])
-        
-    w_p = W_Q   # position weight
-    w_v = W_V  # velocity weight
-    w_a = W_U  # acceleration weight
-    
     # Initialize Simulator
     if(SIMULATOR=="mujoco"):
         from orc.utils.mujoco_simulator import MujocoSimulator
@@ -142,7 +135,7 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
             tau_viscous = np.zeros(nq)     
             
             # Viewer / Visualization flags
-            use_viewer = True          # Enable viewer
+            use_viewer = VIEWER        # Enable viewer
             which_viewer = 'meshcat'   # 'gepetto' or 'meshcat'
             viewer_name = "robot_simulator"
             show_floor = False         # Often checked in viewer init
@@ -152,7 +145,6 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
         simu = RobotSimulator(DummyConf, r)
         simu.init(q0, dq0)
         simu.display(q0)
-
     # print("Create optimization parameters")
     opti = cs.Opti()
     param_x_init = opti.parameter(nx) # Initial state parameter (updated every MPC step)
@@ -167,7 +159,7 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
     dq  = cs.SX.sym('dq', nq)
     ddq = cs.SX.sym('ddq', nq)
     state = cs.vertcat(q, dq)
-    rhs    = cs.vertcat(dq, ddq)
+    rhs   = cs.vertcat(dq, ddq)
     f = cs.Function('f', [state, ddq], [rhs]) # Simple integrator f(x, u) -> x_next
 
     # create a Casadi inverse dynamics function (Pinocchio interface)
@@ -181,10 +173,6 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
     MM = mass_matrix(H_b, q)[6:,6:]
     tau = MM @ ddq + h
     inv_dyn = cs.Function('inv_dyn', [state, ddq], [tau])
-    
-    tau_min = (-robot.model.effortLimit).tolist()
-    tau_max = robot.model.effortLimit.tolist()
-    # print("Torque limits:", tau_min, tau_max)
 
     # ---------------------------------------------------------
     # Decision Variables
@@ -200,51 +188,43 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
     elif controller == 'N+M':
         horizon = N + M
     horizon -= 1
-    # print(f"Using horizon length: {horizon}")
-    # print(robot.model.lowerPositionLimit)
+
     # Create variables for the prediction horizon
     # --- FIX: These loops were commented out, causing X and U to be too short/empty ---
     for k in range(1, horizon+1): 
         X += [opti.variable(nx)]
-        opti.subject_to( opti.bounded([-1.0, -1.0], X[-1][nq:], [1.0, 1.0]))
+        opti.subject_to( opti.bounded( -VELOCITY_LIMIT, X[-1][nq:], VELOCITY_LIMIT) )
     for k in range(horizon): 
         U += [opti.variable(nq)]
     # ---------------------------------------------------------------------------------
 
     # print("Add initial conditions")
     opti.subject_to(X[0] == param_x_init)
-    
     # Cost function and Dynamics constraints
     for k in range(horizon):     
         # Quadratic Running Cost
-        cost += w_p * (X[k][:nq] - param_q_des).T @ (X[k][:nq] - param_q_des)
-        cost += w_v * X[k][nq:].T @ X[k][nq:]
-        cost += w_a * U[k].T @ U[k]
-        # cost += w_p * np.dot((X[k][:nq] - param_q_des), (X[k][:nq] - param_q_des))
-        # cost += w_v * np.dot(X[k][nq:], X[k][nq:])
-        # cost += w_a * np.dot(U[k], U[k])
+        cost += W_P * cs.sumsqr(X[k][:nq] - param_q_des)
+        cost += W_V * cs.sumsqr(X[k][nq:])
+        # cost += W_A * cs.sumsqr(U[k])
 
-        # Dynamics constraint: x_{k+1} = x_k + dt * f(x_k, u_k)
-        # Note: U[k] here represents acceleration (ddq), not torque. 
-        # The torque limit is enforced via _enforce_actuation which likely maps ddq -> tau
+        cost += W_A * inv_dyn(X[k], U[k]).T @ inv_dyn(X[k], U[k])
+
+        # Dynamics constraint: 
         opti.subject_to(X[k+1] == X[k] + DT * f(X[k], U[k]))
-        # opti.subject_to(X[k+1] == f(X[k], U[k]))
         
-        # Actuation limits (torque limits)
+        # Actuation limits (torque limits)        
+        opti.subject_to( opti.bounded(-TORQUE_LIMIT, inv_dyn(X[k], U[k]), TORQUE_LIMIT) )
+
         # _enforce_actuation(opti, U[k])
         
-        opti.subject_to( opti.bounded(-TORQUE_LIMIT, inv_dyn(X[k], U[k]), TORQUE_LIMIT))
-        
-
-
     # Optional terminal cost
     if controller == 'M_term':
         # Add learned terminal cost V(x_N)
         if terminal_cost_fn is not None:
-             cost += terminal_cost_fn(X[horizon])
+            cost += terminal_cost_fn(X[horizon])
         elif tcost_model is not None:
-             l4_term = tcost_model.create_casadi_function()
-             cost += l4_term(X[horizon])
+            l4_term = tcost_model.create_casadi_function()
+            cost += l4_term(X[horizon])
         else:
             raise ValueError('tcost_model or terminal_cost_fn required for M_term controller')
 
@@ -272,9 +252,14 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
     x = np.concatenate([q0, dq0])
     opti.set_value(param_q_des, q_des)
     opti.set_value(param_x_init, x)
-    sol = opti.solve()
     opts["ipopt.max_iter"] = SOLVER_MAX_ITER
     opti.solver("ipopt", opts)
+
+    try:
+        sol = opti.solve()
+    except:
+        sol = opti.debug
+        
     # ---------------------------------------------------------
     # Initialize Data Logging
     # ---------------------------------------------------------
@@ -292,11 +277,9 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
     # Early stop if tracking error remains below steady_error_tol for steady_time seconds
     stopped_early = False
     stop_iter = None
-    # steady_counter = 0
-    # steady_steps_required = max(1, int(np.ceil(steady_time / DT))) if steady_time and steady_time > 0 else None
     taus = []
     # print("Start the MPC loop")
-    for i in range(T):
+    for _ in range(T):
         # print("\n--- MPC Iteration %d ---"%i)
         start_time = clock()
 
@@ -350,43 +333,15 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
         
         # Costo Posizione: w_p * (q - q_des)^T (q - q_des)
         pos_error = curr_q - q_des
-        cost_pos = w_p * np.dot(pos_error.T, pos_error)
-        
-        # Costo Velocità: w_v * v^T v
-        cost_vel = w_v * np.dot(curr_v.T, curr_v)
-        
-        # Costo Input: w_a * u^T u
-        cost_input = w_a * np.dot(u_applied.T, u_applied)
-        
-        # 4. Somma al totale
-        total_cost += (cost_pos + cost_vel + cost_input)
-        # print(f"Step {i}: Cost Pos {cost_pos:.4f}, Cost Vel {cost_vel:.4f}, Cost Input {cost_input:.4f}, Total Step Cost {cost_pos + cost_vel + cost_input:.4f}")
-
-        # Check for sustained near-zero tracking error and stop simulation if met
-        error_norm = np.linalg.norm(curr_q - q_des)
-        # if steady_steps_required is not None:
-        #     if error_norm < steady_error_tol:
-        #         steady_counter += 1
-        #     else:
-        #         steady_counter = 0
-        #     if steady_counter >= steady_steps_required:
-        #         stopped_early = True
-        #         stop_iter = i
-        #         # If we have a predicted next state, append it so trajectory and reference lengths match
-        #         try:
-        #             if 'pred_x' in locals() and pred_x is not None and pred_x.shape[0] >= 2:
-        #                 next_state = pred_x[1]
-        #                 traj.append(next_state.copy())
-        #         except Exception:
-        #             pass
-        #         if verbose:
-        #             print(colored(f"Stopping simulation at step {i} (t={i*DT:.3f}s): error {error_norm:.3e} < {steady_error_tol} for {steady_time}s", "green"))
-        #         break
+        total_cost += W_P * np.dot(pos_error.T, pos_error)
+        total_cost += W_V * np.dot(curr_v.T, curr_v)
+        # total_cost += W_A * np.dot(u_applied.T, u_applied)
+        tau = inv_dyn(sol.value(X[0]), sol.value(U[0])).toarray().squeeze()
+        total_cost += W_A * np.dot(tau.T, tau)
 
         # ---------------------------------------------------------
         # Step Simulator
         # ---------------------------------------------------------
-        tau = inv_dyn(sol.value(X[0]), sol.value(U[0])).toarray().squeeze()
         taus.append(tau)
         # print(f"Step {i}: Applying control (torque) {tau}")
         if(SIMULATOR=="mujoco"):

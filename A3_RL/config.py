@@ -4,6 +4,7 @@ import multiprocessing
 from example_robot_data.robots_loader import load
 import pinocchio as pin
 from adam.casadi.computations import KinDynComputations
+import numpy as np
 
 PENDULUM = os.environ.get('ROBOT_TYPE', 'double_pendulum').lower()
 
@@ -21,30 +22,49 @@ else:
 
 joints_name_list = [s for s in ROBOT.model.names[1:]] # skip the first name because it is "universe"
 NQ = len(joints_name_list)  # number of joints
-NX = 2*NQ # size of the state variable
-# Controls are torques, one per joint
-NU = NQ  # size of the control input
+NX = 2 * NQ
+NU = NQ
 KINDYN = KinDynComputations(ROBOT.urdf, joints_name_list)
-# Actuation and limits
-TORQUE_LIMIT = getattr(ROBOT, 'umax', getattr(ROBOT, 'torque_limit', 10.0))
+
+VELOCITY_LIMIT = np.where(
+    ROBOT.model.velocityLimit != 0,
+    ROBOT.model.velocityLimit,
+    20.0
+)
+
+ACCEL_LIMIT = np.array([9.81 * 2] * NQ)
+
+TORQUE_LIMIT = np.where(
+    ROBOT.model.effortLimit != 0,
+    ROBOT.model.effortLimit,
+    10.0
+)
 
 # OCP / simulation parameters
 N = 100
 DT = 0.02
-M = 4
+M = 5
 
 T = 500  # Total simulation time steps
 
 # Dataset / parallelism
-NUM_SAMPLES = 1000
+NUM_SAMPLES = 5000
 NUM_CORES = multiprocessing.cpu_count()
 
 # Cost weights
-W_Q = 100
-W_V = 1.0
-W_U = 1e-4
+W_P = 100.0
+W_V = 10.0
+W_A = 1.0e-3
+
+# Neural network
+HIDDEN_SIZE = 128
+EPOCHS = 1000
+BATCH_SIZE = 128
+LR = 5e-4
+PATIENCE = 100
 
 # Convenience
+VIEWER = False
 SEED = 55
 
 __all__ = [

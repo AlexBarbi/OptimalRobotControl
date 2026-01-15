@@ -1,3 +1,5 @@
+import config
+
 import copy
 import torch
 import torch.nn as nn
@@ -156,11 +158,11 @@ def train_network(x_data, y_data, batch_size=32, epochs=50000, lr=1e-4, save_dir
     # ub_val = max_cost * 1.0 # Heuristic scaling factor
     ub_val = 1.0
     
-    model = NeuralNetwork(input_dim, 128, output_dim, ub=ub_val).to(device)
+    model = NeuralNetwork(input_dim, config.HIDDEN_SIZE, output_dim, ub=ub_val).to(device)
     
     # Loss function and Optimizer
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    optimizer = optim.Adam(model.parameters(), lr=config.LR)
 
     # Training Loop
     train_losses = []
@@ -210,17 +212,15 @@ def train_network(x_data, y_data, batch_size=32, epochs=50000, lr=1e-4, save_dir
         test_losses.append(epoch_test_loss)
 
         # Save best model logic
+        if (epoch + 1) % 50 == 0:
+            print(f"Epoch [{epoch+1}/{epochs}], Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_test_loss:.4f}")
+
         if epoch_test_loss < best_loss:
             best_loss = epoch_test_loss
             best_model_state = model.state_dict().copy()  # Create explicit copy
             patience_counter = 0
-            if (epoch + 1) % 50 == 0:
-                print(f"Epoch [{epoch+1}/{epochs}], Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_test_loss:.4f} *")
         else:
             patience_counter += 1
-            if (epoch + 1) % 50 == 0:
-                print(f"Epoch [{epoch+1}/{epochs}], Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_test_loss:.4f}")
-            
             if patience_counter >= patience:
                 print(f"Early stopping triggered at epoch {epoch+1}")
                 print(f"Best validation loss: {best_loss:.4f}")

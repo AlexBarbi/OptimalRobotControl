@@ -5,8 +5,7 @@ flexible solver with small wrappers for legacy call sites.
 """
 import casadi as cs
 import numpy as np
-from config import NQ, NX, NU, W_Q, W_V, W_U, TORQUE_LIMIT, KINDYN, ROBOT, DT, N
-
+from config import NQ, NX, NU, W_P, W_V, W_A, VELOCITY_LIMIT, TORQUE_LIMIT, KINDYN, ROBOT, DT, N
 
 def _enforce_actuation(opti, U_k):
     """
@@ -16,13 +15,13 @@ def _enforce_actuation(opti, U_k):
         opti (casadi.Opti): The optimization problem instance.
         U_k (casadi.MX): The control variable at step k.
     """
+
     try:
         for j in range(NU):
-            opti.subject_to(U_k[j] <= TORQUE_LIMIT)
-            opti.subject_to(U_k[j] >= -TORQUE_LIMIT)
+            opti.subject_to(U_k[j] <= 9.81)
+            opti.subject_to(U_k[j] >= - 9.81)
     except Exception:
         pass
-
 
 def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control=False):
     """
@@ -73,9 +72,6 @@ def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control
     # Check if J is within bounds for this robot (Double pendulum has nq=2)
     if J < NQ:
         q_des[J] = qMin[J] + 0.01*(qMax[J] - qMin[J])
-    w_p = W_Q   # position weight
-    w_v = W_V  # velocity weight
-    w_a = W_U  # acceleration weight
 
     # print("Create optimization parameters")
     ''' The parameters P contain:
@@ -84,7 +80,7 @@ def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control
     '''
     opti = cs.Opti()
     param_x_init = opti.parameter(NX)
-    param_q_des = opti.parameter(NQ)
+    param_q_des  = opti.parameter(NQ)
     cost = 0
 
     # ---------------------------------------------------------
@@ -95,7 +91,7 @@ def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control
     dq  = cs.SX.sym('dq', NQ)
     ddq = cs.SX.sym('ddq', NQ)
     state = cs.vertcat(q, dq)
-    rhs    = cs.vertcat(dq, ddq)
+    rhs   = cs.vertcat(dq, ddq)
     f = cs.Function('f', [state, ddq], [rhs])
 
     # Robot Physical Parameters and Dynamics
@@ -110,24 +106,16 @@ def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control
     MM = mass_matrix(H_b, q)[6:,6:]
     tau = MM @ ddq + h
     inv_dyn = cs.Function('inv_dyn', [state, ddq], [tau])
-
-    # Forward Dynamics: ddq = M^{-1} * (tau - h)
-    # ddq_from_tau = cs.inv(MM) @ (tau_sym - h)
-    # rhs = cs.vertcat(dq, tau)
-
-    # Discrete Time Dynamics Function f(x, u) -> x_next
-    # Note: This will be used in the Euler integration step X[k+1] = X[k] + dt * f(X[k], U[k])
-    # f = cs.Function('f', [state, tau_sym], [rhs])
-
-    horizon = N -1
+    
+    horizon = N - 1
     # ---------------------------------------------------------
     # Decision Variables
     # ---------------------------------------------------------
     X, U = [], []
-    X += [opti.variable(NX)] # do not apply pos/vel bounds on initial state
+    X += [opti.variable(NX)]
     for k in range(1, horizon+1): 
         X += [opti.variable(NX)]
-        opti.subject_to( opti.bounded([-1.0, -1.0], X[-1][NQ:], [1.0, 1.0]))
+        opti.subject_to( opti.bounded(-VELOCITY_LIMIT, X[-1][NQ:], VELOCITY_LIMIT) )
     for k in range(horizon): 
         U += [opti.variable(NU)]
 
@@ -138,36 +126,21 @@ def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control
     # Cost & Constraints Loop
     # ---------------------------------------------------------
     for k in range(horizon - 1):     
-        # Quadratic Running Cost: 
-        # J_k = w_p * ||q - q_des||^2 + w_v * ||dq||^2 + w_u * ||u||^2
-        cost += w_p * (X[k][:NQ] - param_q_des).T @ (X[k][:NQ] - param_q_des)
-        cost += w_v * X[k][NQ:].T @ X[k][NQ:]
-        cost += w_a * U[k].T @ U[k]
-        # cost += w_p * np.dot((X[k][:NQ] - param_q_des), (X[k][:NQ] - param_q_des))
-        # cost += w_v * np.dot(X[k][NQ:], X[k][NQ:])
-        # cost += w_a * np.dot(U[k], U[k])
+        # Running cost
+        cost += W_P * cs.sumsqr(X[k][:NQ] - param_q_des)
+        cost += W_V * cs.sumsqr(X[k][NQ:])
+        cost += W_A * cs.sumsqr(U[k])
 
         # Dynamics constraints (Simple Euler integration)
         opti.subject_to(X[k+1] == X[k] + DT * f(X[k], U[k]))
         
-
-
         # Torque limits
-        # _enforce_actuation(opti, U[k])
-        opti.subject_to( opti.bounded(-TORQUE_LIMIT, inv_dyn(X[k], U[k]), TORQUE_LIMIT))
-
-    
-    # ---------------------------------------------------------
-    # Terminal Cost
-    # ---------------------------------------------------------
-    # Standard quadratic terminal cost
-    # cost += w_p * (X[horizon][:NQ] - param_q_des).T @ (X[horizon][:NQ] - param_q_des)
-    # cost += w_v * X[horizon][NQ:].T @ X[horizon][NQ:]
-    
+        opti.subject_to( opti.bounded(-TORQUE_LIMIT, inv_dyn(X[k], U[k]), TORQUE_LIMIT) )
+   
     # Learned Terminal Cost (Value Function Approximation)
     # If provided, this allows the short-horizon OCP to approximate an infinite-horizon problem
-    # if terminal_model is not None:
-    #     cost += terminal_model(X[horizon])
+    if terminal_model is not None:
+        cost += terminal_model(X[horizon])
 
     opti.minimize(cost)
 
@@ -241,37 +214,3 @@ def solve_single_ocp(x_init):
     Used for generating the Value Function dataset.
     """
     return solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control=False)
-
-
-# def solve_single_ocp_with_terminal(x_init, terminal_model=None):
-#     """
-#     Solves OCP with a terminal cost model. 
-#     Returns (x_init, optimal_cost).
-#     """
-#     return solve_ocp(x_init, horizon=horizon, terminal_model=terminal_model, return_xN=False, return_first_control=False)
-
-
-# def solve_single_ocp_return_terminal(x_init):
-#     """
-#     Solves OCP and returns (x_init, optimal_cost, x_N).
-#     Used for bootstrapping or analyzing the terminal state.
-#     """
-#     return solve_ocp(x_init, terminal_model=None, return_xN=True)
-
-
-# def solve_single_ocp_with_terminal_return_terminal(x_init, terminal_model=None):
-#     """
-#     Solves OCP with terminal model and returns (x_init, optimal_cost, x_N).
-#     """
-#     return solve_ocp(x_init, terminal_model=terminal_model, return_xN=True)
-
-
-# def solve_single_ocp_get_first_control(x_init, terminal_model=None):
-#     """
-#     Solves OCP and returns the first control input (u0) and predicted trajectories.
-#     Standard interface for MPC/Receding Horizon Control.
-#     """
-#     res = solve_ocp(x_init, terminal_model=terminal_model, return_first_control=True)
-#     if res is None:
-#         return None, None, None
-#     return res

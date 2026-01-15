@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+import copy
+import config
+
 import numpy as np
 import multiprocessing
 import time
@@ -79,7 +82,7 @@ def run_simulation_instance(args):
         try:
             # delegated to simulation.simulate_mpc
             # print(f"Worker {pid}: Running controller {c} for test state {test_state}...")
-            res = simulate_mpc(test_state, controller=c, terminal_cost_fn=term_fn, verbose=False)
+            res = simulate_mpc(test_state, controller=c, terminal_cost_fn=term_fn)
         except Exception as e:
             res = None
         results[c] = res
@@ -88,7 +91,7 @@ def run_simulation_instance(args):
     return idx, test_state, results
 
 # Configuration and constants have been moved to `config.py`
-from config import NQ, NX, NU, N, DT, NUM_SAMPLES, NUM_CORES, T, PENDULUM, M, SEED
+from config import NQ, NX, NU, N, DT, NUM_SAMPLES, NUM_CORES, T, PENDULUM, M, SEED, VELOCITY_LIMIT
 
 # Determine model directory based on robot type
 if PENDULUM == 'single_pendulum':
@@ -103,33 +106,10 @@ def solve_single_ocp(x_init):
     from ocp import solve_single_ocp as _solve
     return _solve(x_init)
 
-# def solve_single_ocp_with_terminal(x_init, terminal_model=None):
-#     """Wrapper delegating to `ocp.solve_single_ocp` with a terminal model."""
-#     from ocp import solve_ocp
-#     return solve_ocp(x_init, terminal_model=terminal_model)
-
-
-# def solve_single_ocp_return_terminal(x_init):
-#     """
-#     Solves OCP and returns the optimal cost (Value function).
-#     Wrapper for `ocp.solve_single_ocp_return_terminal`.
-#     """
-#     from ocp import solve_single_ocp_return_terminal as _impl
-#     return _impl(x_init)
-
-
-# def solve_single_ocp_with_terminal_return_terminal(x_init, terminal_model=None):
-#     """
-#     Solves OCP with a terminal cost model and returns the optimal cost.
-#     Wrapper for `ocp.solve_single_ocp_with_terminal_return_terminal`.
-#     """
-#     from ocp import solve_single_ocp_with_terminal_return_terminal as _impl
-#     return _impl(x_init, terminal_model=terminal_model)
-
 def generate_random_state():
     """Generates a random initial state. Wrapper for `data.generate_random_state`."""
     from data import generate_random_state as _impl
-    return _impl()
+    return _impl(q_min=[-np.pi] * NQ, q_max=[np.pi] * NQ, dq_max=VELOCITY_LIMIT)
 
 
 def simulate_mpc(*args, **kwargs):
@@ -138,8 +118,7 @@ def simulate_mpc(*args, **kwargs):
     return _impl(*args, **kwargs)
 
 
-def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, 
-         simulate=True, sim_tests=10, save=None):
+def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, sim_tests=10, save=None):
     """
     Main function to orchestrate data generation, model training, and MPC simulation comparisons.
 
@@ -166,7 +145,17 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None,
         start_time = time.time()
         with multiprocessing.Pool(processes=NUM_CORES) as pool:
             # Solves optimal control problem for each state to get V*(x)
-            results = list(tqdm(pool.imap(solve_single_ocp, initial_states), total=len(initial_states), desc="Generating Data"))
+            results = list(
+                tqdm(
+                    pool.imap_unordered(
+                        solve_single_ocp,
+                        initial_states,
+                        chunksize=16
+                    ),
+                    total=len(initial_states),
+                    desc="Generating Data"
+                )
+            )
         end_time = time.time()
 
         # 3. Filter valid results (where solver converged)
@@ -180,10 +169,7 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None,
         y_data = np.array([res[1] for res in valid_data]) # Optimal costs (Value function)
 
         print(f'The dataset generation took {end_time - start_time:.2f} [s], with {len(valid_data)} valid solutions')
-        # print(f'First 50 points of the dataset (x_init, V*):')
-        # for i in range(min(50, len(valid_data))):
-            # print(f"  x_init[{i}]: {x_data[i]}, V*[{i}]: {y_data[i]}")
-        # Save dataset for future use
+
         os.makedirs(MODEL_DIR, exist_ok=True)
         np.savez(os.path.join(MODEL_DIR, 'value_function_data_grid.npz'), x_init=x_data, V_opt=y_data)
     else:
@@ -215,14 +201,19 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None,
     if LOAD_MODEL_PATH == None:
         print("Starting training...")
         # Train neural network to approximate the Value function (Terminal Cost)
-        tcost_model = train_network(x_data, y_data, save_dir=MODEL_DIR)
+        tcost_model = train_network(x_data, y_data, 
+                                    epochs=config.EPOCHS,
+                                    batch_size=config.BATCH_SIZE,
+                                    lr=config.LR,
+                                    patience=config.PATIENCE,
+                                    save_dir=MODEL_DIR)
     else:
         print(f"Loading model from {LOAD_MODEL_PATH}")
         checkpoint = torch.load(LOAD_MODEL_PATH, weights_only=True)
         model_state_dict = checkpoint['model']
         ub_val = checkpoint['ub'] # Normalization/scaling constant if used
 
-        tcost_model = NeuralNetwork(input_dim, 128, output_dim, ub=ub_val).to(device)
+        tcost_model = NeuralNetwork(input_dim, config.HIDDEN_SIZE, output_dim, ub=ub_val).to(device)
         tcost_model.load_state_dict(model_state_dict)
         
     # --- COMPARISON LOGIC ---
@@ -231,7 +222,7 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None,
     print("="*30)
     
     # If simulate-only mode: skip one-shot open-loop solves and batch comparisons
-    if simulate:
+    if sim_tests > 0:
         # print(f"Simulate-only mode: running {sim_tests} closed-loop simulation(s).")
         controllers = ['M', 'M_term', 'N+M']
         
@@ -241,8 +232,7 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None,
         # directory to save plots/data
         if save:
             os.makedirs(save, exist_ok=True)
-            
-        import copy
+        
         # Ensure model is on CPU for multiprocessing sharing (pickling)
         tcost_cpu = copy.deepcopy(tcost_model).cpu()
         
@@ -257,10 +247,9 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None,
         
         # Execute simulations in parallel
         with multiprocessing.Pool(processes=NUM_CORES) as pool:
-             results_list = list(tqdm(pool.imap(run_simulation_instance, sim_args), total=len(sim_args), desc="Running Simulations"))
+            results_list = list(tqdm(pool.imap(run_simulation_instance, sim_args), total=len(sim_args), desc="Running Simulations"))
 
         # print(f"Simulations completed in {time.time() - start_time_all:.2f}s.")
-        
         # Process results
         for i, (_, _, res_dict) in enumerate(results_list):
             is_last = (i == len(results_list) - 1)
@@ -302,7 +291,7 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None,
 
                         try:
                             # Generate comparison plots for positions, velocities, and torques
-                            fig, axs = plt.subplots(3, 1, figsize=(8, 9), sharex=True)
+                            fig, axs = plt.subplots(4, 1, figsize=(8, 9), sharex=True)
                             # Positions
                             for j in range(NQ):
                                 axs[0].plot(t_states, traj[:, j], label=f'q{j} (actual)')
@@ -329,12 +318,12 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None,
                             axs[2].grid(True)
                             
                             # Torques
-                            # for j in range(NU):
-                            #         axs[3].plot(t_torques, res['applied_torques'][:, j], label=f'tau{j} (applied)')
-                            # axs[3].set_ylabel('torque')
-                            # axs[3].set_xlabel('time [s]')
-                            # axs[3].legend(loc='best')
-                            # axs[3].grid(True)
+                            for j in range(NU):
+                                    axs[3].plot(t_torques, res['applied_torques'][:, j], label=f'tau{j} (applied)')
+                            axs[3].set_ylabel('torque')
+                            axs[3].set_xlabel('time [s]')
+                            axs[3].legend(loc='best')
+                            axs[3].grid(True)
 
                             fig.suptitle(f'Closed-loop {c} (Last Sim) Total cost: {total_cost:.4f}')
                             fig.tight_layout(rect=[0, 0, 1, 0.96])
@@ -382,13 +371,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Run MPC comparison experiments')
     parser.add_argument('--load-data', type=str, default=None, help='Path to dataset (.npz)')
     parser.add_argument('--load-model', type=str, default=None, help='Path to model (.pt)')
-    # parser.add_argument('--M', type=int, default=10, help='Short horizon M')
-    # parser.add_argument('--N', type=int, default=100, help='Long horizon N used in training')
-    # parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducibility')
-    parser.add_argument('--sim', action='store_true', help='Run closed-loop MPC simulations')
-    parser.add_argument('--Nsim', type=int, default=10, help='Number of initial states for closed-loop simulation')
+    parser.add_argument('--sim', type=int, default=0, help='Number of initial states for closed-loop simulation')
     parser.add_argument('--save', type=str, default=None, help='Directory to save closed-loop simulation results')
-    parser.add_argument('--robot', type=str, default=None, help='Robot selection: double_pendulum or single_pendulum')
     args = parser.parse_args()
     
     LOAD_DATA_PATH = args.load_data if args.load_data else (os.path.join(MODEL_DIR, 'value_function_data_grid.npz') if os.path.exists(os.path.join(MODEL_DIR, 'value_function_data_grid.npz')) else None)
@@ -398,4 +382,4 @@ if __name__ == "__main__":
         ))
     )
 
-    main(LOAD_DATA_PATH, LOAD_MODEL_PATH, simulate=args.sim, sim_tests=args.Nsim, save=args.save)
+    main(LOAD_DATA_PATH, LOAD_MODEL_PATH, sim_tests=args.sim, save=args.save)
