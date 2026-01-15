@@ -71,8 +71,8 @@ def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control
         q_des = np.array([0.0, np.pi])
     J = 1
     # Check if J is within bounds for this robot (Double pendulum has nq=2)
-    if J < NQ:
-        q_des[J] = qMin[J] + 0.01*(qMax[J] - qMin[J])
+    # if J < NQ:
+    #     q_des[J] = qMin[J] + 0.01*(qMax[J] - qMin[J])
     w_p = W_Q   # position weight
     w_v = W_V  # velocity weight
     w_a = W_U  # acceleration weight
@@ -127,7 +127,7 @@ def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control
     X += [opti.variable(NX)] # do not apply pos/vel bounds on initial state
     for k in range(1, horizon+1): 
         X += [opti.variable(NX)]
-        opti.subject_to( opti.bounded([-1.0, -1.0], X[-1][NQ:], [1.0, 1.0]))
+        opti.subject_to( opti.bounded([-10.0, -10.0], X[-1][NQ:], [10.0, 10.0]))
     for k in range(horizon): 
         U += [opti.variable(NU)]
 
@@ -143,9 +143,10 @@ def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control
         cost += w_p * (X[k][:NQ] - param_q_des).T @ (X[k][:NQ] - param_q_des)
         cost += w_v * X[k][NQ:].T @ X[k][NQ:]
         cost += w_a * U[k].T @ U[k]
-        # cost += w_p * np.dot((X[k][:NQ] - param_q_des), (X[k][:NQ] - param_q_des))
-        # cost += w_v * np.dot(X[k][NQ:], X[k][NQ:])
-        # cost += w_a * np.dot(U[k], U[k])
+        
+        # cost += w_p * cs.dot((X[k][:NQ] - param_q_des), (X[k][:NQ] - param_q_des))
+        # cost += w_v * cs.dot(X[k][NQ:], X[k][NQ:])
+        # cost += w_a * cs.dot(U[k], U[k])
 
         # Dynamics constraints (Simple Euler integration)
         opti.subject_to(X[k+1] == X[k] + DT * f(X[k], U[k]))

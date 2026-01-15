@@ -111,8 +111,8 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
 
     J = 1
     # Check if J is within bounds for this robot (Double pendulum has nq=2)
-    if J < nq:
-        q_des[J] = qMin[J] + 0.01*(qMax[J] - qMin[J])
+    # if J < nq:
+    #     q_des[J] = qMin[J] + 0.01*(qMax[J] - qMin[J])
         
     w_p = W_Q   # position weight
     w_v = W_V  # velocity weight
@@ -206,7 +206,7 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
     # --- FIX: These loops were commented out, causing X and U to be too short/empty ---
     for k in range(1, horizon+1): 
         X += [opti.variable(nx)]
-        opti.subject_to( opti.bounded([-1.0, -1.0], X[-1][nq:], [1.0, 1.0]))
+        opti.subject_to( opti.bounded([-10.0, -10.0], X[-1][nq:], [10.0, 10.0]))
     for k in range(horizon): 
         U += [opti.variable(nq)]
     # ---------------------------------------------------------------------------------
@@ -220,6 +220,11 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
         cost += w_p * (X[k][:nq] - param_q_des).T @ (X[k][:nq] - param_q_des)
         cost += w_v * X[k][nq:].T @ X[k][nq:]
         cost += w_a * U[k].T @ U[k]
+        # cost += w_p * cs.fabs(X[k][:nq] - param_q_des)
+        # cost += w_v * cs.fabs(X[k][nq:])
+        # cost += w_a * cs.fabs(U[k])
+        
+        
         # cost += w_p * np.dot((X[k][:nq] - param_q_des), (X[k][:nq] - param_q_des))
         # cost += w_v * np.dot(X[k][nq:], X[k][nq:])
         # cost += w_a * np.dot(U[k], U[k])
@@ -278,7 +283,7 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
     # ---------------------------------------------------------
     # Initialize Data Logging
     # ---------------------------------------------------------
-    # time.sleep(3)  
+    time.sleep(3)  
     
      
     traj = [x.copy()]   # Store initial state
@@ -297,6 +302,7 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
     taus = []
     # print("Start the MPC loop")
     for i in range(T):
+        
         # print("\n--- MPC Iteration %d ---"%i)
         start_time = clock()
 
@@ -350,6 +356,7 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
         
         # Costo Posizione: w_p * (q - q_des)^T (q - q_des)
         pos_error = curr_q - q_des
+        pos_error = np.mod(pos_error + np.pi, 2 * np.pi) - np.pi
         cost_pos = w_p * np.dot(pos_error.T, pos_error)
         
         # Costo Velocità: w_v * v^T v
@@ -363,7 +370,7 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
         # print(f"Step {i}: Cost Pos {cost_pos:.4f}, Cost Vel {cost_vel:.4f}, Cost Input {cost_input:.4f}, Total Step Cost {cost_pos + cost_vel + cost_input:.4f}")
 
         # Check for sustained near-zero tracking error and stop simulation if met
-        error_norm = np.linalg.norm(curr_q - q_des)
+        error_norm = np.linalg.norm(pos_error)
         # if steady_steps_required is not None:
         #     if error_norm < steady_error_tol:
         #         steady_counter += 1
