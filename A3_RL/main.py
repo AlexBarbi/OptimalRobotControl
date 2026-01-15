@@ -171,7 +171,7 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, sim_tests=10, save=None)
         print(f'The dataset generation took {end_time - start_time:.2f} [s], with {len(valid_data)} valid solutions')
 
         os.makedirs(MODEL_DIR, exist_ok=True)
-        np.savez(os.path.join(MODEL_DIR, 'value_function_data_grid.npz'), x_init=x_data, V_opt=y_data)
+        np.savez(os.path.join(MODEL_DIR, f'dataset_{end_time - start_time:.2f}.npz'), x_init=x_data, V_opt=y_data)
     else:
         # Load existing dataset
         data = np.load(LOAD_DATA_PATH)
@@ -252,7 +252,7 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, sim_tests=10, save=None)
         # print(f"Simulations completed in {time.time() - start_time_all:.2f}s.")
         # Process results
         for i, (_, _, res_dict) in enumerate(results_list):
-            is_last = (i == len(results_list) - 1)
+            # is_last = (i == len(results_list) - 1)
             
             for c in controllers:
                 res = res_dict.get(c)
@@ -268,71 +268,81 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, sim_tests=10, save=None)
                 sim_results[c].append(total_cost)
                 sim_exec_times[c].append(exec_time_val)
                 
-                # Only save detailed trajectory data for the LAST simulation to avoid clutter
-                if is_last:
-                     # Save trajectory, controls, etc.
-                     traj = np.array(res['trajectory'])
-                     controls = np.array(res['controls'])
-                     predicted_trajs = res.get('predicted_trajs', [])
-                     predicted_us = res.get('predicted_us', [])
-                     reference = res.get('reference_traj', None)
-                     
-                     if traj.ndim == 1: traj = traj.reshape(1, -1) if len(traj.shape)>0 else traj 
-                     if controls.ndim == 1: controls = controls.reshape(-1, 1)
+            
+            # If it's the last simulation, save a combined plot for all controllers
+            # if is_last and save:
+            try:
+                # Create one figure with 9 subplots (3 rows x 3 cols assuming 3 controllers)
+                # Rows: Position, Velocity, Acceleration
+                # Cols: Controllers
+                num_ctrls = len(controllers)
+                fig, axs = plt.subplots(4, num_ctrls, figsize=(5 * num_ctrls, 10), sharex=True)
+                
+                # Ensure axs is 2D array even if num_ctrls=1
+                if num_ctrls == 1:
+                    axs = axs.reshape(4, 1)
+                for idx, c in enumerate(controllers):
+                    res = res_dict.get(c)
+                    if res is None:
+                            continue
+                    
+                    traj = np.array(res['trajectory'])
+                    controls = np.array(res['controls'])
+                    reference = res.get('reference_traj', None)
+                    total_cost_plot = res.get('total_cost', float('nan'))
 
-                     t_states = np.arange(traj.shape[0]) * DT
-                     t_controls = np.arange(controls.shape[0]) * DT if controls.size else np.array([])
-                     t_torques = np.arange(res['applied_torques'].shape[0]) * DT if 'applied_torques' in res else np.array([])
-                     
-                     if save:
-                        npz_path = os.path.join(save, f'closed_loop_{c}_data_last.npz')
-                        np.savez(npz_path, trajectory=traj, controls=controls, t_states=t_states, t_controls=t_controls, predicted_trajs=predicted_trajs, predicted_us=predicted_us, reference_traj=reference)
-                        print(f"  Saved last simulation data to {npz_path}")
+                    if traj.ndim == 1: traj = traj.reshape(1, -1) if len(traj.shape)>0 else traj 
+                    if controls.ndim == 1: controls = controls.reshape(-1, 1)
+                    
+                    t_states = np.arange(traj.shape[0]) * DT
+                    t_controls = np.arange(controls.shape[0]) * DT if controls.size else np.array([])
+                    
+                    # Row 0: Positions
+                    for j in range(NQ):
+                        axs[0, idx].plot(t_states, traj[:, j], label=f'q{j}')
+                        if reference is not None:
+                            axs[0, idx].plot(t_states, reference[:, j], '--', label=f'q{j} ref')
+                    axs[0, idx].set_title(f'{c}\nCost: {float(total_cost_plot):.2f} - Time: {float(sim_exec_times[c][i]):.2f}s')
+                    axs[0, idx].grid(True)
+                    if idx == 0: axs[0, idx].set_ylabel('Position [rad]')
+                    axs[0, idx].legend(loc='best', fontsize='small')
 
-                        try:
-                            # Generate comparison plots for positions, velocities, and torques
-                            fig, axs = plt.subplots(4, 1, figsize=(8, 9), sharex=True)
-                            # Positions
-                            for j in range(NQ):
-                                axs[0].plot(t_states, traj[:, j], label=f'q{j} (actual)')
-                                if reference is not None:
-                                    axs[0].plot(t_states, reference[:, j], '--', label=f'q{j} (ref)')
-                            axs[0].set_ylabel('position')
-                            axs[0].legend(loc='best')
-                            axs[0].grid(True)
-                            # Velocities
-                            for j in range(NQ):
-                                axs[1].plot(t_states, traj[:, NQ + j], label=f'dq{j} (actual)')
-                                if reference is not None:
-                                    axs[1].plot(t_states, reference[:, NQ + j], '--', label=f'dq{j} (ref)')
-                            axs[1].set_ylabel('velocity')
-                            axs[1].legend(loc='best')
-                            axs[1].grid(True)
-                            # Accelerations
-                            if controls.size:
-                                for j in range(NU):
-                                    axs[2].plot(t_controls, controls[:, j], label=f'u{j} (applied)')
-                            axs[2].set_ylabel('acceleration')
-                            axs[2].set_xlabel('time [s]')
-                            axs[2].legend(loc='best')
-                            axs[2].grid(True)
-                            
-                            # Torques
-                            for j in range(NU):
-                                    axs[3].plot(t_torques, res['applied_torques'][:, j], label=f'tau{j} (applied)')
-                            axs[3].set_ylabel('torque')
-                            axs[3].set_xlabel('time [s]')
-                            axs[3].legend(loc='best')
-                            axs[3].grid(True)
+                    # Row 1: Velocities
+                    for j in range(NQ):
+                        axs[1, idx].plot(t_states, traj[:, NQ + j], label=f'dq{j}')
+                        if reference is not None:
+                            axs[1, idx].plot(t_states, reference[:, NQ + j], '--', label=f'dq{j} ref')
+                    axs[1, idx].grid(True)
+                    if idx == 0: axs[1, idx].set_ylabel('Velocity [rad/s]')
+                    
+                    # Row 2: Accelerations
+                    if controls.size:
+                        for j in range(NU):
+                            axs[2, idx].plot(t_controls, controls[:, j], label=f'u{j}')
+                    axs[2, idx].grid(True)
+                    axs[2, idx].set_xlabel('Time [s]')
+                    if idx == 0: axs[2, idx].set_ylabel('Acceleration [rad/s²]')
+                    
+                    # Raw 3: Torques (if available)
+                    for j in range(NU):
+                        if 'applied_torques' in res:
+                            torques = np.array(res['applied_torques'])
+                            if torques.ndim == 1:
+                                torques = torques.reshape(-1, 1)
+                            t_torques = np.arange(torques.shape[0]) * DT
+                            axs[3, idx].plot(t_torques, torques[:, j], label=f'tau{j}')
+                    axs[3, idx].grid(True)
+                    axs[3, idx].set_xlabel('Time [s]')
+                    if idx == 0: axs[3, idx].set_ylabel('Torque [Nm]')
 
-                            fig.suptitle(f'Closed-loop {c} (Last Sim) Total cost: {total_cost:.4f}')
-                            fig.tight_layout(rect=[0, 0, 1, 0.96])
-                            png_path = os.path.join(save, f'closed_loop_{c}_traj_last.png')
-                            fig.savefig(png_path)
-                            plt.close(fig)
-                            print(f"  Saved plot to {png_path}")
-                        except Exception as e:
-                            print(f"  Plotting failed for controller {c}: {e}")
+                fig.suptitle(f'Comparison of Controllers at {i}-th iteration', fontsize=16)
+                fig.tight_layout(rect=[0, 0, 1, 0.96])
+                png_path = os.path.join(save, f'controllers_comparison_{i}.png')
+                fig.savefig(png_path)
+                plt.close(fig)
+                # print(f"  Saved comparison plot to {png_path}")
+            except Exception as e:
+                print(f"  Plotting failed: {e}")
 
         # Summary Statistics
         print("\n" + "="*50)
@@ -340,30 +350,84 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, sim_tests=10, save=None)
         print("="*50)
         
         if save:
-            # Save summary CSV with success rates, mean costs, and execution times
-            summary_csv_path = os.path.join(save, 'closed_loop_summary.csv')
+            # Save summary CSV with detailed results for every simulation
+            summary_csv_path = os.path.join(save, 'simulations_results.csv')
             with open(summary_csv_path, 'w', newline='') as f_csv:
                 csv_writer = csv.writer(f_csv)
-                csv_writer.writerow(['controller', 'success_rate', 'mean_cost', 'std_cost', 'mean_exec_time'])
+                csv_writer.writerow(['simulation_id', 'controller', 'cost', 'exec_time', 'success'])
+
+                for i in range(sim_tests):
+                    for c in controllers:
+                        cost = sim_results[c][i]
+                        exec_time = sim_exec_times[c][i]
+                        success = not np.isnan(cost)
+                        csv_writer.writerow([i, c, cost, exec_time, success])
+
+            # Print summary statistics to console
+            summary_stats_rows = []
+            for c in controllers:
+                costs = [val for val in sim_results[c] if not np.isnan(val)]
+                times = [val for val in sim_exec_times[c] if not np.isnan(val)]
+                success_rate = len(costs) / sim_tests * 100.0
                 
-                for c in controllers:
-                    costs = [val for val in sim_results[c] if not np.isnan(val)]
-                    times = [val for val in sim_exec_times[c] if not np.isnan(val)]
-                    success_rate = len(costs) / sim_tests * 100.0
-                    
-                    mean_cost = np.mean(costs) if costs else float('nan')
-                    std_cost = np.std(costs) if costs else float('nan')
-                    mean_time = np.mean(times) if times else float('nan')
-                    
-                    print(f"Controller: {c}")
-                    print(f"  Success Rate:     {success_rate:.1f}% ({len(costs)}/{sim_tests})")
-                    print(f"  Mean Cost:        {mean_cost:.4f}")
-                    print(f"  Std Cost:         {std_cost:.4f}")
-                    print(f"  Mean Exec Time:   {mean_time:.4f} s")
-                    print("-" * 30)
-                    
-                    csv_writer.writerow([c, success_rate, mean_cost, std_cost, mean_time])
-            print(f"Summary saved to {summary_csv_path}")
+                mean_cost = np.mean(costs) if costs else float('nan')
+                std_cost = np.std(costs) if costs else float('nan')
+                mean_time = np.mean(times) if times else float('nan')
+                
+                # Collect for saving later
+                summary_stats_rows.append([c, success_rate, mean_cost, std_cost, mean_time])
+                
+                print(f"Controller: {c}")
+                print(f"  Success Rate:     {success_rate:.1f}% ({len(costs)}/{sim_tests})")
+                print(f"  Mean Cost:        {mean_cost:.4f}")
+                print(f"  Std Cost:         {std_cost:.4f}")
+                print(f"  Mean Exec Time:   {mean_time:.4f} s")
+                print("-" * 30)
+
+            # Save summary statistics to CSV
+            stats_csv_path = os.path.join(save, 'statistics_summary.csv')
+            try:
+                with open(stats_csv_path, 'w', newline='') as f_stats:
+                    stats_writer = csv.writer(f_stats)
+                    stats_writer.writerow(['controller', 'success_rate', 'mean_cost', 'std_cost', 'mean_time'])
+                    stats_writer.writerows(summary_stats_rows)
+            except Exception as e:
+                print(f"Failed to save stats CSV: {e}")
+
+            # Save summary statistics to PNG
+            try:
+                # Prepare data for formatting
+                table_cell_text = []
+                col_labels = ['Controller', 'Success Rate', 'Mean Cost', 'Std Cost', 'Mean Time']
+                
+                for row in summary_stats_rows:
+                    c, success_rate, mean_cost, std_cost, mean_time = row
+                    formatted_row = [
+                        str(c),
+                        f"{success_rate:.1f}%",
+                        f"{mean_cost:.4f}",
+                        f"{std_cost:.4f}",
+                        f"{mean_time:.4f} s"
+                    ]
+                    table_cell_text.append(formatted_row)
+
+                fig, ax = plt.subplots(figsize=(8, 2 + len(controllers)*0.5))
+                ax.axis('off')
+                ax.axis('tight')
+                
+                table = ax.table(cellText=table_cell_text, colLabels=col_labels, loc='center', cellLoc='center')
+                table.auto_set_font_size(False)
+                table.set_fontsize(10)
+                table.scale(1.2, 1.2)
+                
+                png_path = os.path.join(save, 'statistics_summary.png')
+                plt.savefig(png_path, bbox_inches='tight', dpi=300)
+                plt.close(fig)
+                print(f"Summary PNG saved to {png_path}")
+            except Exception as e:
+                print(f"Could not save summary PNG: {e}")
+
+            print(f"Summary saved to {summary_csv_path} and {stats_csv_path}")
         return
         
 
@@ -375,7 +439,16 @@ if __name__ == "__main__":
     parser.add_argument('--save', type=str, default=None, help='Directory to save closed-loop simulation results')
     args = parser.parse_args()
     
-    LOAD_DATA_PATH = args.load_data if args.load_data else (os.path.join(MODEL_DIR, 'value_function_data_grid.npz') if os.path.exists(os.path.join(MODEL_DIR, 'value_function_data_grid.npz')) else None)
+    LOAD_DATA_PATH = args.load_data
+    if LOAD_DATA_PATH is None:
+        if os.path.exists(MODEL_DIR):
+            all_files = os.listdir(MODEL_DIR)
+            npz_files = [f for f in all_files if f.endswith('.npz')]
+            if npz_files:
+                npz_files.sort()
+                LOAD_DATA_PATH = os.path.join(MODEL_DIR, npz_files[-1])
+                print(f"Auto-detected dataset: {LOAD_DATA_PATH}")
+
     LOAD_MODEL_PATH = args.load_model if args.load_model else (
         (os.path.join(MODEL_DIR,'model.pt') if os.path.exists(os.path.join(MODEL_DIR,'model.pt')) else (
             'model.pt' if os.path.exists('model.pt') else None

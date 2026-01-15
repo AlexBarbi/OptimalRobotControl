@@ -6,8 +6,11 @@ import pinocchio as pin
 from adam.casadi.computations import KinDynComputations
 import numpy as np
 
-PENDULUM = os.environ.get('ROBOT_TYPE', 'double_pendulum').lower()
 
+# PENDULUM = os.environ.get('ROBOT_TYPE', 'double_pendulum').lower()
+ROBOT_TYPE = 'double'  # 'single' or 'double'
+
+PENDULUM = f'{ROBOT_TYPE}_pendulum'
 if PENDULUM == 'single_pendulum':
     urdf_dir = os.path.dirname(os.path.abspath(__file__))
     urdf_path = os.path.join(urdf_dir, 'single_pendulum_description/urdf/single_pendulum.urdf')
@@ -32,7 +35,7 @@ VELOCITY_LIMIT = np.where(
     20.0
 )
 
-ACCEL_LIMIT = np.array([9.81 * 2] * NQ)
+ACCEL_LIMIT = np.array([9.81] * NQ)
 
 TORQUE_LIMIT = np.where(
     ROBOT.model.effortLimit != 0,
@@ -40,34 +43,57 @@ TORQUE_LIMIT = np.where(
     10.0
 )
 
+# OCP solver parameters
+SOLVER_TOLERANCE = 1e-4
+SOLVER_MAX_ITER = 1000
+
 # OCP / simulation parameters
 N = 100
 DT = 0.02
 M = 5
 
-T = 500  # Total simulation time steps
+# Total simulation time steps
+T = 500  
 
 # Dataset / parallelism
 NUM_SAMPLES = 5000
 NUM_CORES = multiprocessing.cpu_count()
 
-# Cost weights
-W_P = 100.0
-W_V = 10.0
-W_A = 1.0e-3
+# Cost weights for single pendulum
+W_P_single = 1e2
+W_V_single = 1e1
+W_A_single = 1e-3
+W_T_single = 1e-3
+
+# Cost weights for double pendulum
+W_P_double = 1e2
+W_V_double = 1e1
+W_A_double = 1e-3
+W_T_double = 1e-3
+
+if PENDULUM == 'single_pendulum':
+    W_P = W_P_single
+    W_V = W_V_single
+    W_A = W_A_single
+    W_T = W_T_single
+else:
+    W_P = W_P_double
+    W_V = W_V_double
+    W_A = W_A_double
+    W_T = W_T_double
 
 # Neural network
 HIDDEN_SIZE = 128
-EPOCHS = 1000
+EPOCHS = 5000
 BATCH_SIZE = 128
 LR = 5e-4
 PATIENCE = 100
 
 # Convenience
 VIEWER = False
-SEED = 55
+SEED = None
 
 __all__ = [
     'robot', 'joints_name_list', 'nq', 'nx', 'nu', 'TORQUE_LIMIT', 'ACTUATED_INDICES',
-    'N', 'M', 'dt', 'NUM_SAMPLES', 'NUM_CORES', 'W_Q', 'W_V', 'W_U', 'SEED'
+    'N', 'M', 'dt', 'NUM_SAMPLES', 'NUM_CORES', 'W_P', 'W_V', 'W_A', 'W_T', 'SEED'
 ]

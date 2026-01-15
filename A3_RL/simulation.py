@@ -14,7 +14,7 @@ from example_robot_data.robots_loader import load
 from adam.casadi.computations import KinDynComputations
 import pinocchio as pin
 
-from config import DT, VELOCITY_LIMIT, TORQUE_LIMIT, W_P, W_V, W_A, T, PENDULUM, N, M, VIEWER
+from config import DT, VELOCITY_LIMIT, TORQUE_LIMIT, W_P, W_V, W_A, W_T, T, PENDULUM, N, M, VIEWER, SOLVER_TOLERANCE, SOLVER_MAX_ITER
 from orc.utils.robot_simulator import RobotSimulator
 from orc.utils.robot_wrapper import RobotWrapper
 
@@ -25,7 +25,7 @@ except ImportError:
     def _enforce_actuation(opti, u):
         pass
 
-def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbose=False, steady_time=0.5, steady_error_tol=1e-2):
+def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None):
     """
     Runs a closed-loop MPC simulation for a given controller configuration.
 
@@ -70,10 +70,6 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
         robot.urdf = urdf_path
     else:
         robot = load(PENDULUM)
-        # urdf_dir = os.path.dirname(os.path.abspath(__file__))
-        # urdf_path = os.path.join(urdf_dir, 'double_pendulum_description/urdf/double_pendulum.urdf')
-        # robot = pin.RobotWrapper.BuildFromURDF(urdf_path, package_dirs=[urdf_dir])
-        # robot.urdf = urdf_path
 
     # print("Create KinDynComputations object")
     joints_name_list = [s for s in robot.model.names[1:]] # skip the first name because it is "universe"
@@ -81,27 +77,19 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
     nx = 2*nq # size of the state variable
     kinDyn = KinDynComputations(robot.urdf, joints_name_list)
 
-    ADD_SPHERE = 0
-    SPHERE_POS = np.array([0.2, -0.10, 0.5])
-    SPHERE_SIZE = np.ones(3)*0.1
-    SPHERE_RGBA = np.array([1, 0, 0, 1.])
-
     DO_WARM_START = True
-    SOLVER_TOLERANCE = 1e-4
-    SOLVER_MAX_ITER = 1000
 
-    SIMULATOR = "pinocchio" #"mujoco" or "pinocchio" or "ideal"
-    POS_BOUNDS_SCALING_FACTOR = 0.2
-    qMin = POS_BOUNDS_SCALING_FACTOR * robot.model.lowerPositionLimit
-    qMax = POS_BOUNDS_SCALING_FACTOR * robot.model.upperPositionLimit
-    # print("Position limits:", qMin, qMax)
+    # POS_BOUNDS_SCALING_FACTOR = 0.2
+    # qMin = POS_BOUNDS_SCALING_FACTOR * robot.model.lowerPositionLimit
+    # qMax = POS_BOUNDS_SCALING_FACTOR * robot.model.upperPositionLimit
     
     # TODO: CHECK
     dt_sim = 0.002
     # dt_sim = DT
     
     q0 = x0[:nq]
-    dq0 = np.zeros(nq)
+    # dq0 = np.zeros(nq)
+    dq0 = x0[nq:]
     # x0 = np.concatenate([q0, dq0])
 
     # MPC parameters
@@ -112,39 +100,34 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
         q_des = np.array([0.0, 0.0])
 
     # Initialize Simulator
-    if(SIMULATOR=="mujoco"):
-        from orc.utils.mujoco_simulator import MujocoSimulator
-        print("Creating simulator...")
-        simu = MujocoSimulator("ur5", dt_sim) 
-        simu.set_state(q0, dq0)
-    else:
-        r = RobotWrapper(robot.model, robot.collision_model, robot.visual_model)
+    r = RobotWrapper(robot.model, robot.collision_model, robot.visual_model)
+    
+    # --- FIX: Create a COMPREHENSIVE dummy configuration object ---
+    class DummyConf:
+        q0 = np.zeros(nq)          # Correct size for Double Pendulum (2)
+        dt = dt_sim                # Time step
         
-        # --- FIX: Create a COMPREHENSIVE dummy configuration object ---
-        class DummyConf:
-            q0 = np.zeros(nq)          # Correct size for Double Pendulum (2)
-            dt = dt_sim                # Time step
+        # Physics / Simulation flags
+        randomize_robot_model = False
+        model_variation = 0.0
+        simulation_type = 'euler' # 'timestepping' or 'euler'
+        
+        # Friction parameters
+        tau_coulomb_max = np.zeros(nq) 
+        tau_viscous = np.zeros(nq)     
+        
+        # Viewer / Visualization flags
+        use_viewer = VIEWER        # Enable viewer
+        which_viewer = 'meshcat'   # 'gepetto' or 'meshcat'
+        viewer_name = "robot_simulator"
+        show_floor = False         # Often checked in viewer init
+        DISPLAY_T = dt_sim         # Refresh period for viewer
+        frame_name = "ee_link"     # Frame to track (usually end-effector)
             
-            # Physics / Simulation flags
-            randomize_robot_model = False
-            model_variation = 0.0
-            simulation_type = 'euler' # 'timestepping' or 'euler'
-            
-            # Friction parameters
-            tau_coulomb_max = np.zeros(nq) 
-            tau_viscous = np.zeros(nq)     
-            
-            # Viewer / Visualization flags
-            use_viewer = VIEWER        # Enable viewer
-            which_viewer = 'meshcat'   # 'gepetto' or 'meshcat'
-            viewer_name = "robot_simulator"
-            show_floor = False         # Often checked in viewer init
-            DISPLAY_T = dt_sim         # Refresh period for viewer
-            frame_name = "ee_link"     # Frame to track (usually end-effector)
-            
-        simu = RobotSimulator(DummyConf, r)
-        simu.init(q0, dq0)
-        simu.display(q0)
+    simu = RobotSimulator(DummyConf, r)
+    simu.init(q0, dq0)
+    simu.display(q0)
+    
     # print("Create optimization parameters")
     opti = cs.Opti()
     param_x_init = opti.parameter(nx) # Initial state parameter (updated every MPC step)
@@ -207,7 +190,8 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
         cost += W_V * cs.sumsqr(X[k][nq:])
         # cost += W_A * cs.sumsqr(U[k])
 
-        cost += W_A * inv_dyn(X[k], U[k]).T @ inv_dyn(X[k], U[k])
+        # cost += W_A * inv_dyn(X[k], U[k]).T @ inv_dyn(X[k], U[k])
+        cost += W_T * cs.sumsqr(inv_dyn(X[k], U[k]))
 
         # Dynamics constraint: 
         opti.subject_to(X[k+1] == X[k] + DT * f(X[k], U[k]))
@@ -215,7 +199,7 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
         # Actuation limits (torque limits)        
         opti.subject_to( opti.bounded(-TORQUE_LIMIT, inv_dyn(X[k], U[k]), TORQUE_LIMIT) )
 
-        # _enforce_actuation(opti, U[k])
+        _enforce_actuation(opti, U[k])
         
     # Optional terminal cost
     if controller == 'M_term':
@@ -240,13 +224,9 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
         "ipopt.compl_inf_tol": SOLVER_TOLERANCE,
         "print_time": 0,                # print information about execution time
         "detect_simple_bounds": True,
-        "ipopt.max_iter": 1000
+        "ipopt.max_iter": SOLVER_MAX_ITER
     }
     opti.solver("ipopt", opts)
-
-    # set up simulation environment
-    if(SIMULATOR=="mujoco" and ADD_SPHERE):
-        simu.add_sphere(pos=SPHERE_POS, size=SPHERE_SIZE, rgba=SPHERE_RGBA)
 
     # Solve the problem to convergence the first time
     x = np.concatenate([q0, dq0])
@@ -326,35 +306,24 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None, verbos
         # ---------------------------------------------------------
         curr_q = x[:nq]
         curr_v = x[nq:]
-        # step_cost = w_p * np.sum((curr_q - q_des)**2) + \
-        #             w_a * np.sum(u_applied**2) + \
-        #             w_v * np.sum(curr_v**2)
-        # total_cost += step_cost
         
         # Costo Posizione: w_p * (q - q_des)^T (q - q_des)
         pos_error = curr_q - q_des
-        total_cost += W_P * np.dot(pos_error.T, pos_error)
-        total_cost += W_V * np.dot(curr_v.T, curr_v)
-        # total_cost += W_A * np.dot(u_applied.T, u_applied)
+        total_cost += W_P * cs.sumsqr(pos_error.T)
+        total_cost += W_V * cs.sumsqr(curr_v.T)
+        # total_cost += W_A * cs.sumsqr(u_applied.T)
         tau = inv_dyn(sol.value(X[0]), sol.value(U[0])).toarray().squeeze()
-        total_cost += W_A * np.dot(tau.T, tau)
-
+        
+        total_cost += W_A * cs.sumsqr(tau.T)
         # ---------------------------------------------------------
         # Step Simulator
         # ---------------------------------------------------------
-        taus.append(tau)
-        # print(f"Step {i}: Applying control (torque) {tau}")
-        if(SIMULATOR=="mujoco"):
-            simu.step(tau, DT)
-            x = np.concatenate([simu.data.qpos, simu.data.qvel])
-        elif(SIMULATOR=="pinocchio"):
-            simu.simulate(tau, DT, int(DT/dt_sim))
-            x = np.concatenate([simu.q, simu.v])
-        elif(SIMULATOR=="ideal"):
-            x = sol.value(X[1])
+        simu.simulate(tau, DT, int(DT/dt_sim))
+        x = np.concatenate([simu.q, simu.v])
 
         # Store new state
         traj.append(x.copy())
+        taus.append(tau)
     
     # ---------------------------------------------------------
     # Construct Reference Trajectory for Return

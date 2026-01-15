@@ -118,7 +118,7 @@ class NeuralNetwork(nn.Module):
         # Return casadi function: f(x) = y
         return cs.Function(name, [x], [y])
 
-def train_network(x_data, y_data, batch_size=32, epochs=50000, lr=1e-4, save_dir='model_double', patience=100):
+def train_network(x_data, y_data, batch_size=32, epochs=10000, lr=1e-4, save_dir='model_double', patience=100):
     """
     Trains the neural network to approximate the value function.
 
@@ -126,7 +126,7 @@ def train_network(x_data, y_data, batch_size=32, epochs=50000, lr=1e-4, save_dir
         x_data (np.ndarray): Input data (states).
         y_data (np.ndarray): Target data (optimal costs).
         batch_size (int, optional): Batch size for training. Defaults to 32.
-        epochs (int, optional): Number of training epochs. Defaults to 500.
+        epochs (int, optional): Number of training epochs. Defaults to 10000.
         lr (float, optional): Learning rate. Defaults to 1e-3.
         save_dir (str, optional): Directory to save the trained model. Defaults to 'model_double'.
         patience (int, optional): Number of epochs to wait for improvement before early stopping. Defaults to 50.
@@ -249,7 +249,7 @@ def train_network(x_data, y_data, batch_size=32, epochs=50000, lr=1e-4, save_dir
     plt.yscale('log')
     plt.xlabel('Epochs')
     plt.ylabel('MSE Loss')
-    plt.title('Training History')
+    plt.title(f'Training History in {end - start:.2f} seconds')
     plt.legend()
 
     # Prediction Accuracy
@@ -278,6 +278,8 @@ def train_network(x_data, y_data, batch_size=32, epochs=50000, lr=1e-4, save_dir
     plt.legend()
     
     plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, 'training_plots.png'))
     plt.show()
+    
     
     return model

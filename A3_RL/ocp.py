@@ -5,7 +5,7 @@ flexible solver with small wrappers for legacy call sites.
 """
 import casadi as cs
 import numpy as np
-from config import NQ, NX, NU, W_P, W_V, W_A, VELOCITY_LIMIT, TORQUE_LIMIT, KINDYN, ROBOT, DT, N
+from config import NQ, NX, NU, W_P, W_V, W_A, W_T, VELOCITY_LIMIT, TORQUE_LIMIT, KINDYN, ROBOT, DT, N, SOLVER_TOLERANCE, SOLVER_MAX_ITER
 
 def _enforce_actuation(opti, U_k):
     """
@@ -46,14 +46,10 @@ def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control
             - Returns None if the solver fails.
     """
 
-    SOLVER_TOLERANCE = 1e-4
-    SOLVER_MAX_ITER = 1000
-
-    # SIMULATOR = "pinocchio" #"mujoco" or "pinocchio" or "ideal"
-    POS_BOUNDS_SCALING_FACTOR = 0.2
+    # POS_BOUNDS_SCALING_FACTOR = 0.2
     # VEL_BOUNDS_SCALING_FACTOR = 2.0
-    qMin = POS_BOUNDS_SCALING_FACTOR * ROBOT.model.lowerPositionLimit
-    qMax = POS_BOUNDS_SCALING_FACTOR * ROBOT.model.upperPositionLimit
+    # qMin = POS_BOUNDS_SCALING_FACTOR * ROBOT.model.lowerPositionLimit
+    # qMax = POS_BOUNDS_SCALING_FACTOR * ROBOT.model.upperPositionLimit
     # vMax = VEL_BOUNDS_SCALING_FACTOR * ROBOT.model.velocityLimit
     # dt_sim = DT
     # N_sim = horizon
@@ -61,17 +57,10 @@ def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control
     q0 = x_init[:NQ]  # initial joint configuration
     dq0 = x_init[NQ:]  # initial joint velocities
 
-    # dt = 0.010 # time step MPC
-    # horizon = horizon  # time horizon MPC
-    # q_des = np.array([0, -1.57, 0, 0, 0, 0]) # desired joint configuration
     if NQ == 1:
         q_des = np.array([0.0])
     else:
         q_des = np.array([0.0, np.pi])
-    J = 1
-    # Check if J is within bounds for this robot (Double pendulum has nq=2)
-    if J < NQ:
-        q_des[J] = qMin[J] + 0.01*(qMax[J] - qMin[J])
 
     # print("Create optimization parameters")
     ''' The parameters P contain:
@@ -129,7 +118,9 @@ def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control
         # Running cost
         cost += W_P * cs.sumsqr(X[k][:NQ] - param_q_des)
         cost += W_V * cs.sumsqr(X[k][NQ:])
-        cost += W_A * cs.sumsqr(U[k])
+        # cost += W_A * cs.sumsqr(U[k])
+        
+        cost += W_T * cs.sumsqr(inv_dyn(X[k], U[k]))
 
         # Dynamics constraints (Simple Euler integration)
         opti.subject_to(X[k+1] == X[k] + DT * f(X[k], U[k]))
@@ -154,7 +145,7 @@ def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control
         "ipopt.compl_inf_tol": SOLVER_TOLERANCE,
         "print_time": 0,                # print information about execution time
         "detect_simple_bounds": True,
-        "ipopt.max_iter": 1000
+        "ipopt.max_iter": SOLVER_MAX_ITER
     }
 
     opti.solver("ipopt", opts)
