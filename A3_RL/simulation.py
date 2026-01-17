@@ -14,16 +14,9 @@ from example_robot_data.robots_loader import load
 from adam.casadi.computations import KinDynComputations
 import pinocchio as pin
 
-from config import DT, VELOCITY_LIMIT, TORQUE_LIMIT, W_P, W_V, W_A, W_T, T, PENDULUM, N, M, VIEWER, SOLVER_TOLERANCE, SOLVER_MAX_ITER
+from config import DT, VELOCITY_LIMIT, ACCEL_LIMIT, TORQUE_LIMIT, W_P, W_V, W_A, W_T, T, PENDULUM, N, M, VIEWER, SOLVER_TOLERANCE, SOLVER_MAX_ITER
 from orc.utils.robot_simulator import RobotSimulator
 from orc.utils.robot_wrapper import RobotWrapper
-
-# Import constraint helper if available in your local ocp.py
-try:
-    from ocp import _enforce_actuation
-except ImportError:
-    def _enforce_actuation(opti, u):
-        pass
 
 def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None):
     """
@@ -88,9 +81,9 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None):
     # dt_sim = DT
     
     q0 = x0[:nq]
-    # dq0 = np.zeros(nq)
-    dq0 = x0[nq:]
-    # x0 = np.concatenate([q0, dq0])
+    # dq0 = x0[nq:]
+    dq0 = np.zeros(nq)
+    x0 = np.concatenate([q0, dq0])
 
     # MPC parameters
     # q_des = np.array([0.0, np.pi])
@@ -179,6 +172,7 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None):
         opti.subject_to( opti.bounded( -VELOCITY_LIMIT, X[-1][nq:], VELOCITY_LIMIT) )
     for k in range(horizon): 
         U += [opti.variable(nq)]
+        opti.subject_to( opti.bounded(-ACCEL_LIMIT, U[-1], ACCEL_LIMIT) )
     # ---------------------------------------------------------------------------------
 
     # print("Add initial conditions")
@@ -186,20 +180,18 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None):
     # Cost function and Dynamics constraints
     for k in range(horizon):     
         # Quadratic Running Cost
+        tau = inv_dyn(X[k], U[k])
+
         cost += W_P * cs.sumsqr(X[k][:nq] - param_q_des)
         cost += W_V * cs.sumsqr(X[k][nq:])
         # cost += W_A * cs.sumsqr(U[k])
-
-        # cost += W_A * inv_dyn(X[k], U[k]).T @ inv_dyn(X[k], U[k])
-        cost += W_T * cs.sumsqr(inv_dyn(X[k], U[k]))
+        cost += W_T * cs.sumsqr(tau)
 
         # Dynamics constraint: 
         opti.subject_to(X[k+1] == X[k] + DT * f(X[k], U[k]))
         
         # Actuation limits (torque limits)        
-        opti.subject_to( opti.bounded(-TORQUE_LIMIT, inv_dyn(X[k], U[k]), TORQUE_LIMIT) )
-
-        _enforce_actuation(opti, U[k])
+        opti.subject_to( opti.bounded(-TORQUE_LIMIT, tau, TORQUE_LIMIT) )
         
     # Optional terminal cost
     if controller == 'M_term':
@@ -309,12 +301,12 @@ def simulate_mpc(x0, controller, tcost_model=None, terminal_cost_fn=None):
         
         # Costo Posizione: w_p * (q - q_des)^T (q - q_des)
         pos_error = curr_q - q_des
-        total_cost += W_P * cs.sumsqr(pos_error.T)
-        total_cost += W_V * cs.sumsqr(curr_v.T)
-        # total_cost += W_A * cs.sumsqr(u_applied.T)
         tau = inv_dyn(sol.value(X[0]), sol.value(U[0])).toarray().squeeze()
+        total_cost += W_P * cs.sumsqr(pos_error)
+        total_cost += W_V * cs.sumsqr(curr_v)
+        # total_cost += W_A * cs.sumsqr(u_applied)
+        total_cost += W_T * cs.sumsqr(tau)
         
-        total_cost += W_A * cs.sumsqr(tau.T)
         # ---------------------------------------------------------
         # Step Simulator
         # ---------------------------------------------------------

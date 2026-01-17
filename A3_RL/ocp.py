@@ -5,23 +5,7 @@ flexible solver with small wrappers for legacy call sites.
 """
 import casadi as cs
 import numpy as np
-from config import NQ, NX, NU, W_P, W_V, W_A, W_T, VELOCITY_LIMIT, TORQUE_LIMIT, KINDYN, ROBOT, DT, N, SOLVER_TOLERANCE, SOLVER_MAX_ITER
-
-def _enforce_actuation(opti, U_k):
-    """
-    Applies torque limits to the control variable U_k in the optimization problem.
-
-    Args:
-        opti (casadi.Opti): The optimization problem instance.
-        U_k (casadi.MX): The control variable at step k.
-    """
-
-    try:
-        for j in range(NU):
-            opti.subject_to(U_k[j] <= 9.81)
-            opti.subject_to(U_k[j] >= - 9.81)
-    except Exception:
-        pass
+from config import NQ, NX, NU, W_P, W_V, W_T, VELOCITY_LIMIT, ACCEL_LIMIT, TORQUE_LIMIT, KINDYN, ROBOT, DT, N, SOLVER_TOLERANCE, SOLVER_MAX_ITER
 
 def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control=False):
     """
@@ -60,7 +44,7 @@ def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control
     if NQ == 1:
         q_des = np.array([0.0])
     else:
-        q_des = np.array([0.0, np.pi])
+        q_des = np.array([0.0, 0.0])
 
     # print("Create optimization parameters")
     ''' The parameters P contain:
@@ -107,6 +91,7 @@ def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control
         opti.subject_to( opti.bounded(-VELOCITY_LIMIT, X[-1][NQ:], VELOCITY_LIMIT) )
     for k in range(horizon): 
         U += [opti.variable(NU)]
+        opti.subject_to( opti.bounded(-ACCEL_LIMIT, U[-1], ACCEL_LIMIT) )
 
     # print("Add initial conditions")
     opti.subject_to(X[0] == param_x_init)
@@ -119,7 +104,6 @@ def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control
         cost += W_P * cs.sumsqr(X[k][:NQ] - param_q_des)
         cost += W_V * cs.sumsqr(X[k][NQ:])
         # cost += W_A * cs.sumsqr(U[k])
-        
         cost += W_T * cs.sumsqr(inv_dyn(X[k], U[k]))
 
         # Dynamics constraints (Simple Euler integration)
@@ -154,44 +138,9 @@ def solve_ocp(x_init, terminal_model=None, return_xN=False, return_first_control
     x = np.concatenate([q0, dq0])
     opti.set_value(param_q_des, q_des)
     opti.set_value(param_x_init, x)
-
-    # First solve attempt (if it fails we'll try again with different settings)
-    try:
-        sol = opti.solve()
-    except Exception as e:
-        print("Initial solver attempt failed:\horizon", e)
-        print("Attempting a second solve with adjusted options...")
-
-    opts["ipopt.max_iter"] = SOLVER_MAX_ITER
-    opti.solver("ipopt", opts)
     
     try:
         sol = opti.solve()
-        if return_first_control:
-            try:
-                u0 = np.array(sol.value(U[0])).reshape(-1)
-            except Exception:
-                u0 = np.zeros(NU)
-            pred_traj = []
-            for k in range(horizon + 1):
-                try:
-                    pred_traj.append(np.array(sol.value(X[k])).reshape(-1))
-                except Exception:
-                    pred_traj.append(np.zeros(NX))
-            pred_traj = np.array(pred_traj)
-            pred_us = []
-            for k in range(horizon):
-                try:
-                    pred_us.append(np.array(sol.value(U[k])).reshape(-1))
-                except Exception:
-                    pred_us.append(np.zeros(NU))
-            pred_us = np.array(pred_us)
-            return u0, pred_traj, pred_us
-
-        if return_xN:
-            xN = sol.value(X[horizon])
-            return (x_init, sol.value(cost), np.array(xN).reshape(-1))
-
         return (x_init, sol.value(cost))
     except Exception:
         return None
