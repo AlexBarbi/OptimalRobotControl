@@ -20,28 +20,6 @@ from neural_network import train_network, NeuralNetwork
 
 
 def run_simulation_instance(args):
-    """
-    Worker function to run a single simulation instance in parallel.
-    
-    This function initializes a random seed, generates a random initial state,
-    creates a CasADi function for the terminal cost (if applicable), and runs
-    simulations for different controllers:
-    - 'M': MPC with short horizon M.
-    - 'M_term': MPC with short horizon M and learned terminal cost.
-    - 'N+M': MPC with long horizon (baseline).
-
-    Args:
-        args: A tuple containing:
-            idx (int): Index of the simulation instance.
-            seed (int): Base seed for random number generation.
-            tcost_model (NeuralNetwork): The trained neural network for terminal cost.
-            M (int): Short prediction horizon.
-            N_long (int): Long prediction horizon (for baseline).
-            T (float): Simulation duration.
-
-    Returns:
-        tuple: (idx, test_state, results) where results is a dictionary of simulation outcomes.
-    """
     idx, tcost_model, seed = args
     # Reseed to ensure different random states across workers
     pid = os.getpid()
@@ -67,26 +45,21 @@ def run_simulation_instance(args):
     except Exception as e:
         print(f"Worker {pid}: Failed to create l4_model: {e}")
 
-    controllers = ['M', 'M_term', 'N+M']
-    # controllers = ['M_term']
+    controllers = {
+        'M': {'horizon': M, 'terminal_cost': None},
+        'M_term': {'horizon': M, 'terminal_cost': l4_term},
+        'N+M': {'horizon': M+N, 'terminal_cost': None}
+    }
     results = {}
     
-    for c in controllers:
-        term_fn = None
-        if c == 'M_term':
-            if l4_term is None:
-                res = None # Fail gracefully if terminal model creation failed
-            else:
-                term_fn = l4_term
-        
+    for name, params in controllers.items():
         try:
-            # delegated to simulation.simulate_mpc
-            # print(f"Worker {pid}: Running controller {c} for test state {test_state}...")
-            res = simulate_mpc(test_state, controller=c, terminal_cost_fn=term_fn)
+            res = simulate_mpc(test_state, params['horizon'], params['terminal_cost'])
         except Exception as e:
             res = None
-        results[c] = res
-        time.sleep(1)  # slight delay to avoid resource contention
+
+        results[name] = res
+        time.sleep(1)
 
     return idx, test_state, results
 
@@ -348,7 +321,28 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, sim_tests=10, save=None)
         print("\n" + "="*50)
         print("Closed-loop Simulation Summary")
         print("="*50)
-        
+
+        # Print summary statistics to console
+        summary_stats_rows = []
+        for c in controllers:
+            costs = [val for val in sim_results[c] if not np.isnan(val)]
+            times = [val for val in sim_exec_times[c] if not np.isnan(val)]
+            success_rate = len(costs) / sim_tests * 100.0
+            
+            mean_cost = np.mean(costs) if costs else float('nan')
+            std_cost = np.std(costs) if costs else float('nan')
+            mean_time = np.mean(times) if times else float('nan')
+            
+            # Collect for saving later
+            summary_stats_rows.append([c, success_rate, mean_cost, std_cost, mean_time])
+            
+            print(f"Controller: {c}")
+            print(f"  Success Rate:     {success_rate:.1f}% ({len(costs)}/{sim_tests})")
+            print(f"  Mean Cost:        {mean_cost:.4f}")
+            print(f"  Std Cost:         {std_cost:.4f}")
+            print(f"  Mean Exec Time:   {mean_time:.4f} s")
+            print("-" * 30)
+    
         if save:
             # Save summary CSV with detailed results for every simulation
             summary_csv_path = os.path.join(save, 'simulations_results.csv')
@@ -362,27 +356,6 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, sim_tests=10, save=None)
                         exec_time = sim_exec_times[c][i]
                         success = not np.isnan(cost)
                         csv_writer.writerow([i, c, cost, exec_time, success])
-
-            # Print summary statistics to console
-            summary_stats_rows = []
-            for c in controllers:
-                costs = [val for val in sim_results[c] if not np.isnan(val)]
-                times = [val for val in sim_exec_times[c] if not np.isnan(val)]
-                success_rate = len(costs) / sim_tests * 100.0
-                
-                mean_cost = np.mean(costs) if costs else float('nan')
-                std_cost = np.std(costs) if costs else float('nan')
-                mean_time = np.mean(times) if times else float('nan')
-                
-                # Collect for saving later
-                summary_stats_rows.append([c, success_rate, mean_cost, std_cost, mean_time])
-                
-                print(f"Controller: {c}")
-                print(f"  Success Rate:     {success_rate:.1f}% ({len(costs)}/{sim_tests})")
-                print(f"  Mean Cost:        {mean_cost:.4f}")
-                print(f"  Std Cost:         {std_cost:.4f}")
-                print(f"  Mean Exec Time:   {mean_time:.4f} s")
-                print("-" * 30)
 
             # Save summary statistics to CSV
             stats_csv_path = os.path.join(save, 'statistics_summary.csv')
