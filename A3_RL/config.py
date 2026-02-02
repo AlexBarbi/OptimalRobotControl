@@ -51,6 +51,7 @@ SOLVER_MAX_ITER = 1000
 N = 100
 DT = 0.02
 M = 5
+ENFORCE_BOUNDS = False
 
 # Total simulation time steps
 T = 500  

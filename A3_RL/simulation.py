@@ -10,7 +10,7 @@ import pinocchio as pin
 
 import imageio
 
-from config import NQ, DT, W_P, W_V, W_A, W_T, T, PENDULUM, N, M, VIEWER
+from config import NQ, DT, W_P, W_V, W_A, W_T, T, PENDULUM, N, M, VIEWER, ENFORCE_BOUNDS
 from ocp import create_ocp
 from orc.utils.robot_simulator import RobotSimulator
 from orc.utils.robot_wrapper import RobotWrapper
@@ -64,7 +64,7 @@ def simulate_mpc(x0, horizon, terminal_cost_fn=None, record_video=False):
     
     # time.sleep(10)  
     
-    opti, opti_x_init, opti_q_des, X, U, cost, inv_dyn = create_ocp(horizon, terminal_cost_fn)
+    opti, opti_x_init, opti_q_des, X, U, cost, inv_dyn = create_ocp(horizon, terminal_cost_fn, bounds = ENFORCE_BOUNDS)
 
     # Solve the problem to convergence the first time
     x = np.concatenate([q0, dq0])

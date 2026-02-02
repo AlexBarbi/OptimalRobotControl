@@ -7,7 +7,7 @@ import casadi as cs
 import numpy as np
 from config import NQ, NX, NU, W_P, W_V, W_A, W_T, VELOCITY_LIMIT, ACCEL_LIMIT, TORQUE_LIMIT, KINDYN, ROBOT, DT, N, SOLVER_TOLERANCE, SOLVER_MAX_ITER
 
-def create_ocp(horizon, terminal_cost_fn=None):
+def create_ocp(horizon, terminal_cost_fn=None, bounds=False):
     # print("Create optimization parameters")
     ''' The parameters P contain:
         - the initial state (first 12 values)
@@ -46,10 +46,14 @@ def create_ocp(horizon, terminal_cost_fn=None):
     X += [opti.variable(NX)]
     for k in range(1, horizon + 1): 
         X += [opti.variable(NX)]
-        opti.subject_to( opti.bounded(-VELOCITY_LIMIT, X[-1][NQ:], VELOCITY_LIMIT) )
+        if bounds:
+            opti.subject_to( opti.bounded(-VELOCITY_LIMIT, X[-1][NQ:], VELOCITY_LIMIT) )
+
     for k in range(horizon): 
         U += [opti.variable(NU)]
-        opti.subject_to( opti.bounded(-ACCEL_LIMIT, U[-1], ACCEL_LIMIT) )
+
+        if bounds:
+            opti.subject_to( opti.bounded(-ACCEL_LIMIT, U[-1], ACCEL_LIMIT) )
 
     # print("Add initial conditions")
     opti.subject_to(X[0] == param_x_init)
@@ -67,7 +71,8 @@ def create_ocp(horizon, terminal_cost_fn=None):
         opti.subject_to(X[k+1] == X[k] + DT * f(X[k], U[k]))
         
         # Torque limits
-        opti.subject_to( opti.bounded(-TORQUE_LIMIT, tau, TORQUE_LIMIT) )
+        if bounds:
+            opti.subject_to( opti.bounded(-TORQUE_LIMIT, tau, TORQUE_LIMIT) )
    
     if terminal_cost_fn is not None:
         cost += terminal_cost_fn(X[horizon])
@@ -81,7 +86,7 @@ def create_ocp(horizon, terminal_cost_fn=None):
         "ipopt.tol": SOLVER_TOLERANCE,
         "ipopt.constr_viol_tol": SOLVER_TOLERANCE,
         "ipopt.compl_inf_tol": SOLVER_TOLERANCE,
-        "print_time": 0,                # print information about execution time
+        "print_time": 0,
         "detect_simple_bounds": True,
         "ipopt.max_iter": SOLVER_MAX_ITER
     }
@@ -90,11 +95,11 @@ def create_ocp(horizon, terminal_cost_fn=None):
 
     return (opti, param_x_init, param_q_des, X, U, cost, inv_dyn)
 
-def solve_single_ocp(x_init, q_des = [0.0] * NQ):
+def solve_single_ocp(x_init, q_des = [0.0] * NQ, bounds = False):
     q0  = x_init[:NQ]
     dq0 = x_init[NQ:]
     
-    opti, opti_x_init, opti_q_des, _, _, cost, _ = create_ocp(N)
+    opti, opti_x_init, opti_q_des, _, _, cost, _ = create_ocp(N, bounds = bounds)
 
     x = np.concatenate([q0, dq0])
     opti.set_value(opti_x_init, x)
