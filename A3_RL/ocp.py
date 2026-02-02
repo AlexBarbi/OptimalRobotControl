@@ -46,7 +46,7 @@ def create_ocp(horizon, terminal_cost_fn=None):
     X += [opti.variable(NX)]
     for k in range(1, horizon + 1): 
         X += [opti.variable(NX)]
-        # opti.subject_to( opti.bounded(-VELOCITY_LIMIT, X[-1][NQ:], VELOCITY_LIMIT) )
+        opti.subject_to( opti.bounded(-VELOCITY_LIMIT, X[-1][NQ:], VELOCITY_LIMIT) )
     for k in range(horizon): 
         U += [opti.variable(NU)]
         opti.subject_to( opti.bounded(-ACCEL_LIMIT, U[-1], ACCEL_LIMIT) )
@@ -59,7 +59,7 @@ def create_ocp(horizon, terminal_cost_fn=None):
         tau = inv_dyn(X[k], U[k])
         # Running cost
         cost += W_P * cs.sumsqr(X[k][:NQ] - param_q_des)
-        # cost += W_V * cs.sumsqr(X[k][NQ:])
+        cost += W_V * cs.sumsqr(X[k][NQ:])
         # cost += W_A * cs.sumsqr(U[k])
         cost += W_T * cs.sumsqr(tau)
 
@@ -67,7 +67,7 @@ def create_ocp(horizon, terminal_cost_fn=None):
         opti.subject_to(X[k+1] == X[k] + DT * f(X[k], U[k]))
         
         # Torque limits
-        # opti.subject_to( opti.bounded(-TORQUE_LIMIT, tau, TORQUE_LIMIT) )
+        opti.subject_to( opti.bounded(-TORQUE_LIMIT, tau, TORQUE_LIMIT) )
    
     if terminal_cost_fn is not None:
         cost += terminal_cost_fn(X[horizon])

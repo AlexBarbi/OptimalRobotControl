@@ -8,12 +8,14 @@ from example_robot_data.robots_loader import load
 from adam.casadi.computations import KinDynComputations
 import pinocchio as pin
 
+import imageio
+
 from config import NQ, DT, W_P, W_V, W_A, W_T, T, PENDULUM, N, M, VIEWER
 from ocp import create_ocp
 from orc.utils.robot_simulator import RobotSimulator
 from orc.utils.robot_wrapper import RobotWrapper
 
-def simulate_mpc(x0, horizon, terminal_cost_fn=None):
+def simulate_mpc(x0, horizon, terminal_cost_fn=None, record_video=False):
     if PENDULUM == 'single_pendulum':
         urdf_dir = os.path.dirname(os.path.abspath(__file__))
         urdf_path = os.path.join(urdf_dir, 'single_pendulum_description/urdf/single_pendulum.urdf')
@@ -25,8 +27,8 @@ def simulate_mpc(x0, horizon, terminal_cost_fn=None):
     dt_sim = 0.002
     
     q0 = x0[:NQ]
-    # dq0 = x0[NQ:]
-    dq0 = np.zeros(NQ)
+    dq0 = x0[NQ:]
+    # dq0 = np.zeros(NQ)
     x0 = np.concatenate([q0, dq0])
 
     q_des = np.array([0.0] * NQ)
@@ -35,7 +37,8 @@ def simulate_mpc(x0, horizon, terminal_cost_fn=None):
     r = RobotWrapper(robot.model, robot.collision_model, robot.visual_model)
     
     class DummyConf:
-        q0 = np.zeros(NQ)
+        q0 = x0[:NQ]
+        v0 = x0[NQ:]
         dt = dt_sim
         
         # Physics / Simulation flags
@@ -59,6 +62,8 @@ def simulate_mpc(x0, horizon, terminal_cost_fn=None):
     simu.init(q0, dq0)
     simu.display(q0)
     
+    time.sleep(10)  
+    
     opti, opti_x_init, opti_q_des, X, U, cost, inv_dyn = create_ocp(horizon, terminal_cost_fn)
 
     # Solve the problem to convergence the first time
@@ -72,7 +77,6 @@ def simulate_mpc(x0, horizon, terminal_cost_fn=None):
         sol = opti.debug
         
     # Initialize Data Logging
-    time.sleep(3)  
      
     traj = [x.copy()]   # Store initial state
     u_list = []
@@ -87,7 +91,10 @@ def simulate_mpc(x0, horizon, terminal_cost_fn=None):
     stop_iter = None
     taus = []
 
-    horizon -= 1 #TODO
+    horizon -= 1
+    
+    frames = []
+    
     for _ in range(T):
         start_time = clock()
 
@@ -161,7 +168,8 @@ def simulate_mpc(x0, horizon, terminal_cost_fn=None):
         'applied_torques': np.array(taus),
         'stopped_early': stopped_early,
         'stop_time': (stop_iter*DT) if stop_iter is not None else None,
-        'exec_time': exec_time
+        'exec_time': exec_time,
+        'frames': frames
     }
 
 __all__ = ['simulate_mpc']

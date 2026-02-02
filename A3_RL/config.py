@@ -32,10 +32,10 @@ KINDYN = KinDynComputations(ROBOT.urdf, joints_name_list)
 VELOCITY_LIMIT = np.where(
     ROBOT.model.velocityLimit != 0,
     ROBOT.model.velocityLimit,
-    20.0
+    5.0
 )
 
-ACCEL_LIMIT = np.array([9.81] * NQ)
+ACCEL_LIMIT = np.array([9.81 * 2] * NQ)
 
 TORQUE_LIMIT = np.where(
     ROBOT.model.effortLimit != 0,
@@ -56,20 +56,20 @@ M = 5
 T = 500  
 
 # Dataset / parallelism
-NUM_SAMPLES = 5000
+NUM_SAMPLES = 1
 NUM_CORES = multiprocessing.cpu_count()
 
 # Cost weights for single pendulum
 W_P_single = 1e2
 W_V_single = 1e1
-W_A_single = 1e-3
-W_T_single = 1e-3
+W_A_single = 1e-1
+W_T_single = 1e-1
 
 # Cost weights for double pendulum
 W_P_double = 1e2
 W_V_double = 1e1
-W_A_double = 1e-3
-W_T_double = 1e-3
+W_A_double = 1e0
+W_T_double = 1e-1
 
 if PENDULUM == 'single_pendulum':
     W_P = W_P_single
@@ -84,14 +84,14 @@ else:
 
 # Neural network
 HIDDEN_SIZE = 128
-EPOCHS = 5000
+EPOCHS = 10000
 BATCH_SIZE = 128
 LR = 5e-4
 PATIENCE = 100
 
 # Convenience
-VIEWER = False
-SEED = None
+VIEWER = True
+SEED = 43
 
 __all__ = [
     'robot', 'joints_name_list', 'nq', 'nx', 'nu', 'TORQUE_LIMIT', 'ACTUATED_INDICES',

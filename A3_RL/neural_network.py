@@ -195,7 +195,7 @@ def train_network(x_data, y_data, batch_size=32, epochs=10000, lr=1e-4, save_dir
         plt.yscale('log')
         plt.xlabel('Epochs')
         plt.ylabel('MSE Loss')
-        plt.title('Training History')
+        plt.title(f'Training History (Training Time: {end - start:.2f} s)')
         plt.legend()
 
         plt.subplot(1, 2, 2)

@@ -12,15 +12,21 @@ import argparse
 import csv
 import random
 import torch
-import warnings
 from tqdm import tqdm
+import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
 from neural_network import train_network, NeuralNetwork
+from plot_heatmap import plot_heatmap
 
 
 def run_simulation_instance(args):
-    idx, tcost_model, seed = args
+    if len(args) == 4:
+        idx, tcost_model, seed, record_video = args
+    else:
+        idx, tcost_model, seed = args
+        record_video = False
+
     # Reseed to ensure different random states across workers
     pid = os.getpid()
     if seed is not None:
@@ -54,7 +60,7 @@ def run_simulation_instance(args):
     
     for name, params in controllers.items():
         try:
-            res = simulate_mpc(test_state, params['horizon'], params['terminal_cost'])
+            res = simulate_mpc(test_state, params['horizon'], params['terminal_cost'], record_video=record_video)
         except Exception as e:
             res = None
 
@@ -64,7 +70,7 @@ def run_simulation_instance(args):
     return idx, test_state, results
 
 # Configuration and constants have been moved to `config.py`
-from config import NQ, NX, NU, N, DT, NUM_SAMPLES, NUM_CORES, T, PENDULUM, M, SEED, VELOCITY_LIMIT
+from config import NQ, NX, NU, N, DT, NUM_SAMPLES, NUM_CORES, ROBOT, T, PENDULUM, M, SEED, VELOCITY_LIMIT
 
 # Determine model directory based on robot type
 if PENDULUM == 'single_pendulum':
@@ -89,6 +95,33 @@ def simulate_mpc(*args, **kwargs):
     """Runs an MPC simulation. Wrapper for `simulation.simulate_mpc`."""
     from simulation import simulate_mpc as _impl
     return _impl(*args, **kwargs)
+
+
+def run_varying_horizon_simulations():
+    """
+    Runs simulations for 5 different horizon lengths (M) with the same initial state
+    and no terminal cost.
+    """
+    # 5 different values for M
+    m_values = [3, 4, 5, 10, 20, 40]
+    
+    # Generate same initial state for all
+    x_init = generate_random_state()
+    print(f"Running varying M simulations with initial state sample: {x_init[:4]}...")
+
+    results = {}
+    
+    for m_val in m_values:
+        print(f"Starting simulation with M={m_val}...")
+        try:
+            # Run MPC simulation with horizon M and no terminal cost
+            res = simulate_mpc(x_init, horizon=m_val, terminal_cost_fn=None)
+            results[m_val] = res
+            print(f"Finished M={m_val}")
+        except Exception as e:
+            print(f"Error running M={m_val}: {e}")
+            
+    return results
 
 
 def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, sim_tests=10, save=None):
@@ -180,6 +213,7 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, sim_tests=10, save=None)
                                     lr=config.LR,
                                     patience=config.PATIENCE,
                                     save_dir=MODEL_DIR)
+        plot_heatmap()
     else:
         print(f"Loading model from {LOAD_MODEL_PATH}")
         checkpoint = torch.load(LOAD_MODEL_PATH, weights_only=True)
@@ -189,13 +223,49 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, sim_tests=10, save=None)
         tcost_model = NeuralNetwork(input_dim, config.HIDDEN_SIZE, output_dim, ub=ub_val).to(device)
         tcost_model.load_state_dict(model_state_dict)
         
-    # --- COMPARISON LOGIC ---
-    print("\n" + "="*30)
-    print("RUNNING MPC SIMULATIONS")
-    print("="*30)
+    Mflag = False
+    if Mflag:
+        print("\n" + "="*30)
+        print("RUNNING VARYING HORIZON SIMULATIONS")
+        print("="*30)
+        varying_horizon_results = run_varying_horizon_simulations()
+        # Prepare plot
+        fig_vary, axs_vary = plt.subplots(NQ, 1, figsize=(10, 4*NQ), sharex=True)
+        if NQ == 1: axs_vary = [axs_vary]
+        
+        for m_val, res in varying_horizon_results.items():
+            if res is not None:
+                print(f"M={m_val} simulation completed. Total cost: {float(res['total_cost']):.4f}")
+                traj = np.array(res['trajectory'])
+                t_arr = np.arange(len(traj)) * DT
+                for j in range(NQ):
+                    axs_vary[j].plot(t_arr, traj[:, j], label=f'M={m_val}')
+            else:
+                print(f"M={m_val} simulation failed.")
+
+        for j in range(NQ):
+            axs_vary[j].set_ylabel(f'Position q{j} [rad]')
+            axs_vary[j].grid(True)
+            axs_vary[j].legend()
+        axs_vary[-1].set_xlabel('Time [s]')
+        fig_vary.suptitle('Trajectory Comparison for Varying Horizon M')
+        
+        save_path = save if save else "."
+        os.makedirs(save_path, exist_ok=True)
+        out_file = os.path.join(save_path, 'varying_horizon_positions.png')
+        fig_vary.savefig(out_file)
+        print(f"Saved varying horizon plot to {out_file}")
+        plt.close(fig_vary)
+    
+    
+    
     
     # If simulate-only mode: skip one-shot open-loop solves and batch comparisons
     if sim_tests > 0:
+        # --- COMPARISON LOGIC ---
+        print("\n" + "="*30)
+        print("RUNNING MPC SIMULATIONS")
+        print("="*30)
         # print(f"Simulate-only mode: running {sim_tests} closed-loop simulation(s).")
         controllers = ['M', 'M_term', 'N+M']
         
@@ -397,6 +467,7 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, sim_tests=10, save=None)
                 plt.savefig(png_path, bbox_inches='tight', dpi=300)
                 plt.close(fig)
                 print(f"Summary PNG saved to {png_path}")
+                
             except Exception as e:
                 print(f"Could not save summary PNG: {e}")
 
