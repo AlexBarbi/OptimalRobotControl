@@ -17,8 +17,6 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
 from neural_network import train_network, NeuralNetwork
-from plot_heatmap import plot_heatmap
-
 
 def run_simulation_instance(args):
     if len(args) == 4:
@@ -90,39 +88,10 @@ def generate_random_state():
     from data import generate_random_state as _impl
     return _impl(q_min=[-np.pi] * NQ, q_max=[np.pi] * NQ, dq_max=VELOCITY_LIMIT)
 
-
 def simulate_mpc(*args, **kwargs):
     """Runs an MPC simulation. Wrapper for `simulation.simulate_mpc`."""
     from simulation import simulate_mpc as _impl
     return _impl(*args, **kwargs)
-
-
-def run_varying_horizon_simulations():
-    """
-    Runs simulations for 5 different horizon lengths (M) with the same initial state
-    and no terminal cost.
-    """
-    # 5 different values for M
-    m_values = [3, 4, 5, 10, 20, 40]
-    
-    # Generate same initial state for all
-    x_init = generate_random_state()
-    print(f"Running varying M simulations with initial state sample: {x_init[:4]}...")
-
-    results = {}
-    
-    for m_val in m_values:
-        print(f"Starting simulation with M={m_val}...")
-        try:
-            # Run MPC simulation with horizon M and no terminal cost
-            res = simulate_mpc(x_init, horizon=m_val, terminal_cost_fn=None)
-            results[m_val] = res
-            print(f"Finished M={m_val}")
-        except Exception as e:
-            print(f"Error running M={m_val}: {e}")
-            
-    return results
-
 
 def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, sim_tests=10, save=None):
     """
@@ -213,7 +182,6 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, sim_tests=10, save=None)
                                     lr=config.LR,
                                     patience=config.PATIENCE,
                                     save_dir=MODEL_DIR)
-        plot_heatmap()
     else:
         print(f"Loading model from {LOAD_MODEL_PATH}")
         checkpoint = torch.load(LOAD_MODEL_PATH, weights_only=True)
@@ -223,43 +191,6 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, sim_tests=10, save=None)
         tcost_model = NeuralNetwork(input_dim, config.HIDDEN_SIZE, output_dim, ub=ub_val).to(device)
         tcost_model.load_state_dict(model_state_dict)
         
-    Mflag = False
-    if Mflag:
-        print("\n" + "="*30)
-        print("RUNNING VARYING HORIZON SIMULATIONS")
-        print("="*30)
-        varying_horizon_results = run_varying_horizon_simulations()
-        # Prepare plot
-        fig_vary, axs_vary = plt.subplots(NQ, 1, figsize=(10, 4*NQ), sharex=True)
-        if NQ == 1: axs_vary = [axs_vary]
-        
-        for m_val, res in varying_horizon_results.items():
-            if res is not None:
-                print(f"M={m_val} simulation completed. Total cost: {float(res['total_cost']):.4f}")
-                traj = np.array(res['trajectory'])
-                t_arr = np.arange(len(traj)) * DT
-                for j in range(NQ):
-                    axs_vary[j].plot(t_arr, traj[:, j], label=f'M={m_val}')
-            else:
-                print(f"M={m_val} simulation failed.")
-
-        for j in range(NQ):
-            axs_vary[j].set_ylabel(f'Position q{j} [rad]')
-            axs_vary[j].grid(True)
-            axs_vary[j].legend()
-        axs_vary[-1].set_xlabel('Time [s]')
-        fig_vary.suptitle('Trajectory Comparison for Varying Horizon M')
-        
-        save_path = save if save else "."
-        os.makedirs(save_path, exist_ok=True)
-        out_file = os.path.join(save_path, 'varying_horizon_positions.png')
-        fig_vary.savefig(out_file)
-        print(f"Saved varying horizon plot to {out_file}")
-        plt.close(fig_vary)
-    
-    
-    
-    
     # If simulate-only mode: skip one-shot open-loop solves and batch comparisons
     if sim_tests > 0:
         # --- COMPARISON LOGIC ---
