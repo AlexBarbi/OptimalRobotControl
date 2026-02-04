@@ -13,10 +13,8 @@ def run_varying_horizon_simulations():
     Runs simulations for 5 different horizon lengths (M) with the same initial state
     and no terminal cost.
     """
-    # 5 different values for M
     m_values = [3, 4, 5, 10, 20, 40]
-    
-    # Generate same initial state for all
+
     x_init = generate_random_state()
     print(f"Running varying M simulations with initial state sample: {x_init[:4]}...")
 
@@ -25,7 +23,6 @@ def run_varying_horizon_simulations():
     for m_val in m_values:
         print(f"Starting simulation with M={m_val}...")
         try:
-            # Run MPC simulation with horizon M and no terminal cost
             res = simulate_mpc(x_init, horizon=m_val, terminal_cost_fn=None)
             results[m_val] = res
             print(f"Finished M={m_val}")
@@ -39,7 +36,7 @@ def plot_m_graph():
     print("RUNNING VARYING HORIZON SIMULATIONS")
     print("="*30)
     varying_horizon_results = run_varying_horizon_simulations()
-    # Prepare plot
+
     fig_vary, axs_vary = plt.subplots(NQ, 1, figsize=(10, 4*NQ), sharex=True)
     if NQ == 1: axs_vary = [axs_vary]
 
@@ -67,10 +64,7 @@ def plot_m_graph():
     print(f"Saved varying horizon plot to {out_file}")
     plt.close(fig_vary)
 
-def plot_heatmap():
-    # Helper to enforce 'double' configuration in case config was loaded differently (though I changed the file)
-    # The config module executes on import, so changing the file before running this script is key.
-    
+def plot_heatmap():    
     if PENDULUM == 'single_pendulum':
         model_path = os.path.join('model_single', 'model.pt')
     else:
@@ -78,7 +72,6 @@ def plot_heatmap():
     
     if not os.path.exists(model_path):
         print(f"Error: Model file not found at {model_path}")
-        print(f"Please train the model first by running main.py (ensure ROBOT_TYPE='{ROBOT_TYPE}' in config.py).")
         return
 
     print(f"Loading model from {model_path}...")
@@ -88,12 +81,10 @@ def plot_heatmap():
     checkpoint = torch.load(model_path, map_location=device)
     
     # Initialize model
-    # config.NX should be 4 for double pendulum
     input_size = config.NX
     hidden_size = config.HIDDEN_SIZE
     output_size = 1
     
-    # 'ub' might be in checkpoint or we default to 1.0 (from training code logic)
     ub = checkpoint.get('ub', 1.0)
     
     model = NeuralNetwork(input_size, hidden_size, output_size, ub=ub)
@@ -116,18 +107,14 @@ def plot_heatmap():
     else:
         Q1, Q2 = np.meshgrid(q_range, q_range)
     
-    # Flatten for batch processing
     q1_flat = Q1.flatten()
     q2_flat = Q2.flatten()
     zeros = np.zeros_like(q1_flat)
     zeros = np.ones_like(q1_flat) * 10.0
     zeros2 = np.ones_like(q2_flat) * 10.0
     
-    # Create input tensor (Batch, NX)
-    # State order typically: q1, q2, dq1, dq2
-    
     if PENDULUM == 'single_pendulum':
-        # exact match for single pendulum state: [q, dq]
+        # single pendulum state: [q, dq]
         inputs_np = np.stack([q1_flat, q2_flat], axis=1)
     else:
         # double pendulum: [q1, q2, dq1=0, dq2=0]

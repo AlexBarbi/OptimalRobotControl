@@ -18,13 +18,9 @@ if PENDULUM == 'single_pendulum':
     ROBOT.urdf = urdf_path
 else:
     ROBOT = load(PENDULUM)
-    # urdf_dir = os.path.dirname(os.path.abspath(__file__))
-    # urdf_path = os.path.join(urdf_dir, 'double_pendulum_description/urdf/double_pendulum.urdf')
-    # ROBOT = pin.RobotWrapper.BuildFromURDF(urdf_path, package_dirs=[urdf_dir])
-    # ROBOT.urdf = urdf_path
 
 joints_name_list = [s for s in ROBOT.model.names[1:]] # skip the first name because it is "universe"
-NQ = len(joints_name_list)  # number of joints
+NQ = len(joints_name_list) 
 NX = 2 * NQ
 NU = NQ
 KINDYN = KinDynComputations(ROBOT.urdf, joints_name_list)
@@ -63,24 +59,20 @@ NUM_CORES = multiprocessing.cpu_count()
 # Cost weights for single pendulum
 W_P_single = 1e2
 W_V_single = 1e1
-W_A_single = 1e-1
 W_T_single = 1e-1
 
 # Cost weights for double pendulum
 W_P_double = 1e2
 W_V_double = 1e1
-W_A_double = 1e0
 W_T_double = 1e-1
 
 if PENDULUM == 'single_pendulum':
     W_P = W_P_single
     W_V = W_V_single
-    W_A = W_A_single
     W_T = W_T_single
 else:
     W_P = W_P_double
     W_V = W_V_double
-    W_A = W_A_double
     W_T = W_T_double
 
 # Neural network

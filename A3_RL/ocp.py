@@ -1,24 +1,15 @@
-"""Optimal control problem helpers (centralized solver implementations).
-
-This module consolidates the multiple similar solver functions into a single
-flexible solver with small wrappers for legacy call sites.
-"""
 import casadi as cs
 import numpy as np
-from config import NQ, NX, NU, W_P, W_V, W_A, W_T, VELOCITY_LIMIT, ACCEL_LIMIT, TORQUE_LIMIT, KINDYN, ROBOT, DT, N, SOLVER_TOLERANCE, SOLVER_MAX_ITER
+from config import NQ, NX, NU, W_P, W_V, W_T, VELOCITY_LIMIT, ACCEL_LIMIT, TORQUE_LIMIT, KINDYN, ROBOT, DT, N, SOLVER_TOLERANCE, SOLVER_MAX_ITER
 
 def create_ocp(horizon, terminal_cost_fn=None, bounds=False):
-    # print("Create optimization parameters")
-    ''' The parameters P contain:
-        - the initial state (first 12 values)
-        - the target configuration (last 6 values)
-    '''
+    # Optimization problem
     opti = cs.Opti()
     param_x_init = opti.parameter(NX)
     param_q_des  = opti.parameter(NQ)
     cost = 0
 
-    # System Dynamics (Pinocchio + CasADi AD)
+    # System Dynamics
     q   = cs.SX.sym('q', NQ)
     dq  = cs.SX.sym('dq', NQ)
     ddq = cs.SX.sym('ddq', NQ)
@@ -51,11 +42,9 @@ def create_ocp(horizon, terminal_cost_fn=None, bounds=False):
 
     for k in range(horizon): 
         U += [opti.variable(NU)]
-
         if bounds:
             opti.subject_to( opti.bounded(-ACCEL_LIMIT, U[-1], ACCEL_LIMIT) )
 
-    # print("Add initial conditions")
     opti.subject_to(X[0] == param_x_init)
 
     # Cost & Constraints Loop
@@ -64,10 +53,9 @@ def create_ocp(horizon, terminal_cost_fn=None, bounds=False):
         # Running cost
         cost += W_P * cs.sumsqr(X[k][:NQ] - param_q_des)
         cost += W_V * cs.sumsqr(X[k][NQ:])
-        # cost += W_A * cs.sumsqr(U[k])
         cost += W_T * cs.sumsqr(tau)
 
-        # Dynamics constraints (Simple Euler integration)
+        # Dynamics constraints
         opti.subject_to(X[k+1] == X[k] + DT * f(X[k], U[k]))
         
         # Torque limits

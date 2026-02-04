@@ -17,6 +17,13 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
 from neural_network import train_network, NeuralNetwork
+from config import NQ, NX, NU, N, DT, NUM_SAMPLES, NUM_CORES, ROBOT, T, PENDULUM, M, SEED, VELOCITY_LIMIT
+
+# Determine model directory based on robot type
+if PENDULUM == 'single_pendulum':
+    MODEL_DIR = 'model_single'
+else:
+    MODEL_DIR = 'model_double'
 
 def run_simulation_instance(args):
     if len(args) == 4:
@@ -25,7 +32,6 @@ def run_simulation_instance(args):
         idx, tcost_model, seed = args
         record_video = False
 
-    # Reseed to ensure different random states across workers
     pid = os.getpid()
     if seed is not None:
         np.random.seed(seed + idx)
@@ -39,12 +45,10 @@ def run_simulation_instance(args):
 
     test_state = generate_random_state()
     
-    # Create a unique name for the CasADi function to avoid collisions in parallel execution
     unique_name = f"term_cost_{pid}_{idx}"
     l4_term = None
     try:
         tcost_model.cpu() 
-        # Create CasADi function from PyTorch model for efficient evaluation in OCP
         l4_term = tcost_model.create_casadi_function(name=unique_name)
     except Exception as e:
         print(f"Worker {pid}: Failed to create l4_model: {e}")
@@ -67,59 +71,31 @@ def run_simulation_instance(args):
 
     return idx, test_state, results
 
-# Configuration and constants have been moved to `config.py`
-from config import NQ, NX, NU, N, DT, NUM_SAMPLES, NUM_CORES, ROBOT, T, PENDULUM, M, SEED, VELOCITY_LIMIT
-
-# Determine model directory based on robot type
-if PENDULUM == 'single_pendulum':
-    MODEL_DIR = 'model_single'
-else:
-    MODEL_DIR = 'model_double'
-
-# OCP solvers are consolidated in `ocp.py` and simulation helpers in `simulation.py`
-# Dataset helpers are in `data.py`
 def solve_single_ocp(x_init):
-    """Thin wrapper delegating to `ocp.solve_single_ocp`."""
     from ocp import solve_single_ocp as _solve
     return _solve(x_init)
 
 def generate_random_state():
-    """Generates a random initial state. Wrapper for `data.generate_random_state`."""
     from data import generate_random_state as _impl
     return _impl(q_min=[-np.pi] * NQ, q_max=[np.pi] * NQ, dq_max=VELOCITY_LIMIT)
 
 def simulate_mpc(*args, **kwargs):
-    """Runs an MPC simulation. Wrapper for `simulation.simulate_mpc`."""
     from simulation import simulate_mpc as _impl
     return _impl(*args, **kwargs)
 
 def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, sim_tests=10, save=None):
-    """
-    Main function to orchestrate data generation, model training, and MPC simulation comparisons.
-
-    Args:
-        LOAD_DATA_PATH (str, optional): Path to existing dataset .npz file. If None, generates new data.
-        LOAD_MODEL_PATH (str, optional): Path to existing model .pt file. If None, trains a new model.
-        M (int): Prediction horizon for the short-horizon MPC.
-        N (int): Prediction horizon for the long-horizon MPC (used as ground truth/baseline).
-        seed (int, optional): Random seed for reproducibility.
-        sim (bool): Whether to run closed-loop MPC simulations.
-        Nsim (int): Number of simulation instances to run.
-        save (str, optional): Directory to save simulation outcomes and plots.
-    """
-    
     x_data = None
     y_data = None
+
     if LOAD_DATA_PATH == None:
         print(f"Starting data generation with {NUM_SAMPLES} samples on {NUM_CORES} cores.")
 
         # 1. Generate random initial states
         initial_states = [generate_random_state() for _ in range(NUM_SAMPLES)]
             
-        # 2. Parallel Processing to solve OCP for each initial state (Value Function generation)
+        # 2. Parallel Processing to solve OCP for each initial state
         start_time = time.time()
         with multiprocessing.Pool(processes=NUM_CORES) as pool:
-            # Solves optimal control problem for each state to get V*(x)
             results = list(
                 tqdm(
                     pool.imap_unordered(
@@ -137,11 +113,11 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, sim_tests=10, save=None)
         valid_data = [res for res in results if res is not None]
         
         if len(valid_data) == 0:
-            print("Nessuna soluzione valida trovata. Controlla il solver o i vincoli.")
+            print("No valid solution found.")
             return
 
         x_data = np.array([res[0] for res in valid_data]) # Initial states
-        y_data = np.array([res[1] for res in valid_data]) # Optimal costs (Value function)
+        y_data = np.array([res[1] for res in valid_data]) # Optimal costs
 
         print(f'The dataset generation took {end_time - start_time:.2f} [s], with {len(valid_data)} valid solutions')
 
@@ -167,55 +143,53 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, sim_tests=10, save=None)
     
     # Check if model exists or needs to be trained
     if LOAD_MODEL_PATH is None:
-        # Prefer MODEL_DIR/model.pt but keep backward compatibility with model.pt
         if os.path.exists(os.path.join(MODEL_DIR,'model.pt')):
             LOAD_MODEL_PATH = os.path.join(MODEL_DIR,'model.pt')
         elif os.path.exists('model.pt'):
             LOAD_MODEL_PATH = 'model.pt'
 
     if LOAD_MODEL_PATH == None:
+        # Train neural network
         print("Starting training...")
-        # Train neural network to approximate the Value function (Terminal Cost)
-        tcost_model = train_network(x_data, y_data, 
-                                    epochs=config.EPOCHS,
-                                    batch_size=config.BATCH_SIZE,
-                                    lr=config.LR,
-                                    patience=config.PATIENCE,
-                                    save_dir=MODEL_DIR)
+        tcost_model = train_network(
+            x_data, y_data, 
+            epochs=config.EPOCHS,
+            batch_size=config.BATCH_SIZE,
+            lr=config.LR,
+            patience=config.PATIENCE,
+            save_dir=MODEL_DIR
+        )
     else:
+        # Load Neural Network
         print(f"Loading model from {LOAD_MODEL_PATH}")
         checkpoint = torch.load(LOAD_MODEL_PATH, weights_only=True)
         model_state_dict = checkpoint['model']
-        ub_val = checkpoint['ub'] # Normalization/scaling constant if used
+        ub_val = checkpoint['ub']
 
         tcost_model = NeuralNetwork(input_dim, config.HIDDEN_SIZE, output_dim, ub=ub_val).to(device)
         tcost_model.load_state_dict(model_state_dict)
         
-    # If simulate-only mode: skip one-shot open-loop solves and batch comparisons
+    # Simulation tests
     if sim_tests > 0:
-        # --- COMPARISON LOGIC ---
         print("\n" + "="*30)
         print("RUNNING MPC SIMULATIONS")
         print("="*30)
-        # print(f"Simulate-only mode: running {sim_tests} closed-loop simulation(s).")
+        
         controllers = ['M', 'M_term', 'N+M']
         
         sim_results = {c: [] for c in controllers}
         sim_exec_times = {c: [] for c in controllers}
         
-        # directory to save plots/data
+        # Directory to save plots/data
         if save:
             os.makedirs(save, exist_ok=True)
         
-        # Ensure model is on CPU for multiprocessing sharing (pickling)
+        # Ensure model is on CPU for multiprocessing sharing
         tcost_cpu = copy.deepcopy(tcost_model).cpu()
         
         sim_args = []
-        
-        # Prepare arguments for parallel workers
         for i in range(sim_tests):
-            #  seed_i = seed if seed is not None else None
-             sim_args.append((i, tcost_cpu, SEED))
+            sim_args.append((i, tcost_cpu, SEED))
         
         print(f"Starting parallel simulations ({sim_tests}) on {NUM_CORES} cores...")
         
@@ -223,10 +197,8 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, sim_tests=10, save=None)
         with multiprocessing.Pool(processes=NUM_CORES) as pool:
             results_list = list(tqdm(pool.imap(run_simulation_instance, sim_args), total=len(sim_args), desc="Running Simulations"))
 
-        # print(f"Simulations completed in {time.time() - start_time_all:.2f}s.")
         # Process results
         for i, (_, _, res_dict) in enumerate(results_list):
-            # is_last = (i == len(results_list) - 1)
             
             for c in controllers:
                 res = res_dict.get(c)
@@ -242,9 +214,6 @@ def main(LOAD_DATA_PATH = None, LOAD_MODEL_PATH = None, sim_tests=10, save=None)
                 sim_results[c].append(total_cost)
                 sim_exec_times[c].append(exec_time_val)
                 
-            
-            # If it's the last simulation, save a combined plot for all controllers
-            # if is_last and save:
             try:
                 # Create one figure with 9 subplots (3 rows x 3 cols assuming 3 controllers)
                 # Rows: Position, Velocity, Acceleration

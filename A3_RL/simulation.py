@@ -8,9 +8,7 @@ from example_robot_data.robots_loader import load
 from adam.casadi.computations import KinDynComputations
 import pinocchio as pin
 
-import imageio
-
-from config import NQ, DT, W_P, W_V, W_A, W_T, T, PENDULUM, N, M, VIEWER, ENFORCE_BOUNDS
+from config import NQ, DT, W_P, W_V, W_T, T, PENDULUM, N, M, VIEWER, ENFORCE_BOUNDS
 from ocp import create_ocp
 from orc.utils.robot_simulator import RobotSimulator
 from orc.utils.robot_wrapper import RobotWrapper
@@ -79,7 +77,7 @@ def simulate_mpc(x0, horizon, terminal_cost_fn=None, record_video=False):
         
     # Initialize Data Logging
      
-    traj = [x.copy()]   # Store initial state
+    traj = [x.copy()] 
     u_list = []
     predicted_trajs = []
     predicted_us = []
@@ -87,7 +85,6 @@ def simulate_mpc(x0, horizon, terminal_cost_fn=None, record_video=False):
     
     exec_time = []
 
-    # Early stop if tracking error remains below steady_error_tol for steady_time seconds
     stopped_early = False
     stop_iter = None
     taus = []
@@ -106,6 +103,7 @@ def simulate_mpc(x0, horizon, terminal_cost_fn=None, record_video=False):
             opti.set_initial(U[t], sol.value(U[t+1]))
         opti.set_initial(X[horizon], sol.value(X[horizon]))
         opti.set_initial(U[horizon-1], sol.value(U[horizon-1]))
+        
         # initialize dual variables
         lam_g0 = sol.value(opti.lam_g)
         opti.set_initial(opti.lam_g, lam_g0)
@@ -139,7 +137,6 @@ def simulate_mpc(x0, horizon, terminal_cost_fn=None, record_video=False):
 
         total_cost += W_P * cs.sumsqr(pos_error)
         total_cost += W_V * cs.sumsqr(curr_v)
-        # total_cost += W_A * cs.sumsqr(u_applied)
         total_cost += W_T * cs.sumsqr(tau)
         
         # Step Simulator

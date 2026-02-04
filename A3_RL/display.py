@@ -1,10 +1,7 @@
-# Typical header of a Python script using Pinocchio
 from pinocchio.utils import *
 import pinocchio as pin
 from orc.utils.viz_utils import applyViewerConfiguration, addViewerSphere, addViewerCapsule
 
-# Example of a class Display that connect to the viewer and implement a
-# 'place' method to set the position/rotation of a 3D visual object in a scene.
 class Display():
     '''
     Class Display: Example of a class implementing a client for the viewer. The main
@@ -22,8 +19,6 @@ class Display():
             self.viewer = MeshcatVisualizer()
             self.viewer.initViewer(open=open_viewer)
         elif(which_viewer=="gepetto"):
-            # from pinocchio.visualize import GepettoVisualizer
-            # VISUALIZER = GepettoVisualizer
             import gepetto.corbaserver
             import subprocess
             import os

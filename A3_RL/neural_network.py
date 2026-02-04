@@ -1,6 +1,6 @@
 import config
 
-import copy
+import casadi as cs
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -8,10 +8,8 @@ from torch.utils.data import DataLoader, TensorDataset, random_split
 import matplotlib.pyplot as plt
 import os
 import time
-import numpy as np # Aggiunto per gestire inf/nan
 
 from tqdm import tqdm
-import l4casadi as l4
 
 class NeuralNetwork(nn.Module):
     """ 
@@ -42,8 +40,7 @@ class NeuralNetwork(nn.Module):
                 nn.init.xavier_normal_(layer.weight)
                 nn.init.zeros_(layer.bias)
     
-    def create_casadi_function(self, name='terminal_cost'):
-        import casadi as cs
+    def create_casadi_function(self, name='terminal_cost'): 
         self.cpu()
         self.eval()
 
@@ -88,10 +85,13 @@ def train_network(x_data, y_data, batch_size=32, epochs=10000, lr=1e-4, save_dir
     
     model = NeuralNetwork(input_dim, config.HIDDEN_SIZE, output_dim, ub=ub_val).to(device)
     
+    # Loss
     criterion = nn.MSELoss()
+
+    # Optimizer
     optimizer = optim.Adam(model.parameters(), lr=config.LR)
     
-    # --- SCHEDULER ---
+    # Scheduler
     scheduler_patience = max(5, patience // 3)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, 
@@ -106,13 +106,12 @@ def train_network(x_data, y_data, batch_size=32, epochs=10000, lr=1e-4, save_dir
     test_losses = []
 
     best_model_state = None
-    # FIX: Inizializza a Infinito, non a un numero arbitrario
     best_loss = float('inf') 
     patience_counter = 0
 
     start = time.time()
     for epoch in tqdm(range(epochs), desc="Training Progress"):
-        # Training phase
+        # Training
         model.train()
         running_loss = 0.0
         total_samples = 0
@@ -125,9 +124,8 @@ def train_network(x_data, y_data, batch_size=32, epochs=10000, lr=1e-4, save_dir
             outputs = model(inputs)
             loss = criterion(outputs, targets)
             
-            # Controllo NaN immediato
             if torch.isnan(loss):
-                print(f"\nERRORE: Loss is NaN at epoch {epoch+1}. Riduci il Learning Rate.")
+                print(f"\nERROR: Loss is NaN at epoch {epoch+1}")
                 return model
 
             loss.backward()
@@ -139,7 +137,7 @@ def train_network(x_data, y_data, batch_size=32, epochs=10000, lr=1e-4, save_dir
             
         epoch_train_loss = running_loss / total_samples
 
-        # Validation phase
+        # Validation
         model.eval()
         running_test_loss = 0.0
         total_test_samples = 0
@@ -158,11 +156,11 @@ def train_network(x_data, y_data, batch_size=32, epochs=10000, lr=1e-4, save_dir
         scheduler.step(epoch_test_loss)
         current_lr = optimizer.param_groups[0]['lr']
 
-        # Logging periodico
+        # Logging
         if (epoch + 1) % 50 == 0:
             print(f"Epoch [{epoch+1}/{epochs}] | LR: {current_lr:.2e} | Train Loss: {epoch_train_loss:.4f} | Val Loss: {epoch_test_loss:.4f}")
 
-        # Early Stopping Logic corretta
+        # Early Stopping Logic
         if epoch_test_loss < best_loss:
             best_loss = epoch_test_loss
             best_model_state = model.state_dict().copy()
