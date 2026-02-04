@@ -1,0 +1,4 @@
+numpy
+pinocchio
+casadi[adam]=0.3.0
+l4casadi
