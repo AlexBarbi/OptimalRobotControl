@@ -23,3 +23,7 @@ Parameters do the following:
 - `--load_model_path`: Path from which the trained PyTorch model (.pt file) is loaded. If not specified, it defaults to  `model_<pendulum_name>`.
 
 All remaining parameters, including cost weights, neural network architecture, training settings, and model parameters—are defined in the `config.py` file.
+
+### Video Demo
+
+<video src="videos/d_N.mp4" width="600" controls></video>
