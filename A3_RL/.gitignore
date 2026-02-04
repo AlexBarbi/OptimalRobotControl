@@ -1,8 +1,8 @@
-# *.pt
-# *.npz
+*.pt
+*.npz
 
-# model_double/
-# model_single/
+model_double/
+model_single/
 
 double_pendulum_description/
 
