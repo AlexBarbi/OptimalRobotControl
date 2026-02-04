@@ -26,4 +26,7 @@ All remaining parameters, including cost weights, neural network architecture, t
 
 ### Video Demo
 
-![Simulation Video](videos/d_N.gif)
+<p align="center">
+  <img src="videos/d_N.gif" width="620" alt="Tray Overview"
+    onerror="this.style.display='none'"/>
+</p>
