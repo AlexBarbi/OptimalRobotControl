@@ -54,10 +54,10 @@ M = 5
 ENFORCE_BOUNDS = False
 
 # Total simulation time steps
-T = 500  
+T = 750  
 
 # Dataset / parallelism
-NUM_SAMPLES = 1
+NUM_SAMPLES = 10000
 NUM_CORES = multiprocessing.cpu_count()
 
 # Cost weights for single pendulum

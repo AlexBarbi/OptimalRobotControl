@@ -62,7 +62,8 @@ def simulate_mpc(x0, horizon, terminal_cost_fn=None, record_video=False):
     simu.init(q0, dq0)
     simu.display(q0)
     
-    # time.sleep(10)  
+    if VIEWER:
+        time.sleep(10)  
     
     opti, opti_x_init, opti_q_des, X, U, cost, inv_dyn = create_ocp(horizon, terminal_cost_fn, bounds = ENFORCE_BOUNDS)
 
