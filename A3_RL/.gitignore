@@ -13,3 +13,5 @@ simulation_*
 __pycache__/*.pyc
 _l4c_generated/
 tmp_sim/
+
+venv/

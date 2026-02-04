@@ -4,7 +4,7 @@ numpy
 matplotlib
 
 pinocchio
-casadi[adam]==0.3.0
+adam-robotics[casadi]==0.3.0
 l4casadi
 
 torch

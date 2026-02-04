@@ -116,8 +116,7 @@ def train_network(x_data, y_data, batch_size=32, epochs=10000, lr=1e-4, save_dir
         running_loss = 0.0
         total_samples = 0
         
-        batch_loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False)
-        for inputs, targets in batch_loop:
+        for inputs, targets in train_loader:
             inputs, targets = inputs.to(device), targets.to(device)
             
             optimizer.zero_grad()
@@ -155,10 +154,6 @@ def train_network(x_data, y_data, batch_size=32, epochs=10000, lr=1e-4, save_dir
         # Step scheduler
         scheduler.step(epoch_test_loss)
         current_lr = optimizer.param_groups[0]['lr']
-
-        # Logging
-        if (epoch + 1) % 50 == 0:
-            print(f"Epoch [{epoch+1}/{epochs}] | LR: {current_lr:.2e} | Train Loss: {epoch_train_loss:.4f} | Val Loss: {epoch_test_loss:.4f}")
 
         # Early Stopping Logic
         if epoch_test_loss < best_loss:

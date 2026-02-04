@@ -7,8 +7,7 @@ from adam.casadi.computations import KinDynComputations
 import numpy as np
 
 
-# PENDULUM = os.environ.get('ROBOT_TYPE', 'double_pendulum').lower()
-ROBOT_TYPE = 'double'  # 'single' or 'double'
+ROBOT_TYPE = 'single'  # 'single' or 'double'
 
 PENDULUM = f'{ROBOT_TYPE}_pendulum'
 if PENDULUM == 'single_pendulum':
