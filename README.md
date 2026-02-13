@@ -1,37 +1,54 @@
-# ORC_homework
-Barbi and Moscatelli homeworks for ORC course
+# ORC Homework Repository
+
+This repository contains homework assignments and the final project for the **Optimal Robot Control (ORC)** course.
+AUTHORS: **Alejandro Enrique Barbi** & **Alessandro Moscatelli**
+
+The repository is structured into three main assignments, each focusing on a different aspect of robot control.
 
 ---
 
-# Optimal Control Value Function Approximation
+## 📂 Repository Structure
 
-This project implements a pipeline to approximate the **Value Function ** of an Optimal Control Problem (OCP) using Deep Learning. It generates a dataset of optimal costs using trajectory optimization and trains a Neural Network to regress the cost from the initial state.
+### 1. [Assignment 1: Task Space Inverse Dynamics (TSID)](./A1_TSID)
+**Directory:** `A1_TSID/`
 
-## Project Workflow
+This assignment focuses on **Task Space Inverse Dynamics** for bipedal robots (e.g., Romeo, Talos).
+*   **Goal:** Simulate bipedal locomotion, maintain balance, and track Center of Mass (CoM) trajectories.
+*   **Key Scripts:**
+    *   `ex_1_biped.py`: Basic standing and CoM tracking.
+    *   `ex_2_biped_walking.py`: Advanced walking simulation using pre-computed trajectories.
+*   **Dependencies:** `pinocchio`, `tsid`, `example-robot-data`.
 
-The process is divided into two main stages, automated within `main.py`:
+### 2. [Assignment 2: Model Predictive Control (MPC)](./A2_MPC)
+**Directory:** `A2_MPC/`
 
-### 1. Data Generation (OCP Solver)
+This assignment implements **Model Predictive Control (MPC)** problems for a **UR5 robot arm** using **CasADi**.
+*   **Goal:** Compute optimal trajectories for the UR5 end-effector to follow geometric paths (e.g., infinity shape) while minimizing costs (velocity, torque, etc.).
+*   **Key Scripts:**
+    *   `A2_Q1.py`: Basic path following OCP.
+    *   `A2_Q2.py`: Cyclic motion constraints.
+    *   `A2_Q3.py`: Trajectory tracking with time constraints.
+    *   `A2_Q4_*.py`: Time optimization strategies.
+*   **Dependencies:** `casadi`, `adam-robotics`, `pinocchio`.
 
-* **System:** Double Pendulum / UR5 (configurable).
-* **Method:** Solves the Optimal Control Problem for a dense grid of initial states  using **CasADi** and **IPOPT**.
-* **Sampling:** Uses **Grid Generation** to cover the state space uniformly (positions along the full unit circle  and velocities).
-* **Performance:** Utilizes Python `multiprocessing` to solve thousands of OCPs in parallel on all available CPU cores.
-* **Output:** A dataset of state-cost pairs .
+### 3. [Assignment 3: Value Function Approximation (RL/OCP)](./A3_RL)
+**Directory:** `A3_RL/`
 
-### 2. Neural Network Training (Supervised Learning)
+This constitutes the **Final Project**. It implements a pipeline to approximate the **Value Function** of an Optimal Control Problem (OCP) using **Deep Learning**.
+*   **Goal:** Train a Neural Network to regress the optimal cost from an initial state, allowing it to be used as a terminal cost in an MPC formulation.
+*   **Workflow:**
+    1.  **Data Generation:** Solving OCPs for a dense grid of initial states using CasADi/IPOPT.
+    2.  **Training:** Supervised learning with a PyTorch Neural Network.
+    3.  **Simulation:** Verifying performance on Single and Double Pendulum systems.
+*   **Key Scripts:** `main.py` (entry point for data gen, training, and sim).
+*   **Dependencies:** `pytorch`, `casadi`.
 
-* **Model:** A Feedforward Neural Network (MLP) implemented in **PyTorch**.
-* **Architecture:** Input layer  Hidden Layers (Tanh activation)  Output (Scalar Cost).
-* **Scaling:** Incorporates an output scaling factor (`ub`) based on the maximum cost in the dataset to stabilize training.
+---
 
+## 🚀 Getting Started
 
-* **Training:** Minimizes the **Mean Squared Error (MSE)** between the predicted cost and the ground truth optimal cost calculated by the solver.
-* **Validation:** Includes automatic train/test splitting and visualizes convergence (Loss vs. Epochs) and prediction accuracy (Ground Truth vs. Prediction).
+Each directory contains its own `README.md` with detailed instructions on how to install dependencies and run the specific scripts.
 
-## File Structure
+1.  **Navigate directly to the assignment folder:**
 
-* `main.py`: The entry point. Handles grid generation, parallel OCP solving, data processing, and triggers the training loop.
-* `neural_network.py`: Defines the PyTorch `NeuralNetwork` class and the `train_network` function.
-* `model.pt`: The saved trained model weights.
-* `value_function_data.npz`: The generated dataset (saved for reproducibility).
+2.  **Follow the specific instructions** in that folder's `README.md`.
